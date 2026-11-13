@@ -8,6 +8,7 @@ import {
   activeOffice,
   DATABASE_URL,
   finishWelcome,
+  hostEnv,
   IN_APP,
   LINUX,
   LOCAL,
@@ -44,9 +45,9 @@ export const GET: RequestHandler = async () => {
   // account's display name on Windows (local, domain or work account alike).
   const full = await new Promise<string>((done) =>
     MAC
-      ? execFile('id', ['-F'], (_e, out) => done(String(out ?? '').trim()))
+      ? execFile('id', ['-F'], { env: hostEnv() }, (_e, out) => done(String(out ?? '').trim()))
       : LINUX
-        ? execFile('getent', ['passwd', userInfo().username], (_e, out) =>
+        ? execFile('getent', ['passwd', userInfo().username], { env: hostEnv() }, (_e, out) =>
             done(
               String(out ?? '')
                 .split(':')[4]
@@ -63,7 +64,7 @@ export const GET: RequestHandler = async () => {
                 '-Command',
                 'Add-Type -AssemblyName System.DirectoryServices.AccountManagement; [System.DirectoryServices.AccountManagement.UserPrincipal]::Current.DisplayName'
               ],
-              { windowsHide: true, timeout: 10_000 },
+              { env: hostEnv(), windowsHide: true, timeout: 10_000 },
               (_e, out) => done(String(out ?? '').trim())
             )
           : done('')

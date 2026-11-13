@@ -20,7 +20,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import { SYSTEM, type System } from './platform.ts';
+import { hostEnv, SYSTEM, type System } from './platform.ts';
 import { fixedError } from './errors.ts';
 
 const SERVICE = 'oddboro';
@@ -35,8 +35,13 @@ type Store = {
 };
 
 const read = (cmd: string, args: string[]) =>
-  execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-const quiet = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'ignore' });
+  execFileSync(cmd, args, {
+    encoding: 'utf8',
+    env: hostEnv(),
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+const quiet = (cmd: string, args: string[]) =>
+  execFileSync(cmd, args, { env: hostEnv(), stdio: 'ignore' });
 
 /**
  * `security -i` reads one command a line, and runs anything past its 4,095th
@@ -98,6 +103,7 @@ const readPiece = (account: string) => {
     ['find-generic-password', '-s', SERVICE, '-a', account, '-g'],
     {
       encoding: 'utf8',
+      env: hostEnv(),
       stdio: ['ignore', 'ignore', 'pipe']
     }
   );
@@ -121,6 +127,7 @@ const keychain: Store = {
     const lines = saveLines(account, value);
     // stderr stays shut: what security says about a bad line can quote it.
     execFileSync('security', ['-i'], {
+      env: hostEnv(),
       input: `${lines.join('\n')}\n`,
       stdio: ['pipe', 'ignore', 'ignore']
     });
@@ -149,7 +156,7 @@ const secretService: Store = {
     execFileSync(
       'secret-tool',
       ['store', '--label', `Oddboro ${account}`, 'service', SERVICE, 'account', account],
-      { input: value, stdio: ['pipe', 'ignore', 'pipe'] }
+      { env: hostEnv(), input: value, stdio: ['pipe', 'ignore', 'pipe'] }
     );
   },
   // secret-tool prints the value as stored and fails when there is none.

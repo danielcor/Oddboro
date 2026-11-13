@@ -9,7 +9,13 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { currentPlatform, modelSection, runsGoing, type ModelUsage } from '@oddboro/ledger';
+import {
+  currentPlatform,
+  hostEnv,
+  modelSection,
+  runsGoing,
+  type ModelUsage
+} from '@oddboro/ledger';
 import { cleanEnv } from './claude.ts';
 
 /** Where the owner signs a tool in for the office: beside the Odd's "Runs on" picker. */
@@ -204,7 +210,7 @@ export function stopGroups(pid: number, signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM
       execFileSync(
         join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
         ['/PID', String(pid), '/T', '/F'],
-        { windowsHide: true, stdio: 'ignore' }
+        { env: hostEnv(), windowsHide: true, stdio: 'ignore' }
       );
     } catch {
       // The run may already have exited.
@@ -213,7 +219,10 @@ export function stopGroups(pid: number, signal: 'SIGTERM' | 'SIGKILL' = 'SIGTERM
   }
   const groups = new Set([pid]);
   try {
-    const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid='], { encoding: 'utf8' })
+    const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid='], {
+      encoding: 'utf8',
+      env: hostEnv()
+    })
       .trim()
       .split('\n')
       .map((l) => l.trim().split(/\s+/).map(Number));

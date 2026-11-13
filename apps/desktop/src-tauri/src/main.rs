@@ -7,12 +7,13 @@
 
 mod diagnostics;
 mod env;
+mod host;
 mod secrets;
 mod server;
 mod update;
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
 
@@ -356,7 +357,7 @@ fn open_in_browser(url: &Url) {
         return;
     }
     let (opener, first) = OPENER;
-    let spawned = Command::new(opener)
+    let spawned = crate::host::host_command(opener)
         .args(first)
         .arg(url.as_str())
         .stdin(Stdio::null())

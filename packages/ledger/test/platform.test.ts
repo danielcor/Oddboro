@@ -28,7 +28,7 @@ mock.module('node:child_process', {
     }
   }
 });
-const { OPENER_FAILS_WITHIN_MS, openFile } = await import('../src/platform.ts');
+const { OPENER_FAILS_WITHIN_MS, hostEnv, openFile } = await import('../src/platform.ts');
 // The failures below are logged on purpose; keep them out of the test output.
 mock.method(console, 'error', () => {});
 
@@ -44,7 +44,9 @@ test('a file opens with the system opener, the path whole in one argument, detac
   const [{ cmd, args, options, child }] = spawned.splice(0);
   assert.equal(cmd, opener);
   assert.deepEqual(args, words);
-  assert.deepEqual(options, { detached: true, stdio: 'ignore' });
+  const { env, ...rest } = options as { env?: NodeJS.ProcessEnv };
+  assert.deepEqual(rest, { detached: true, stdio: 'ignore' });
+  assert.deepEqual(env, hostEnv());
   assert.equal(child.unrefs, 1, 'the office does not wait on the browser');
 });
 

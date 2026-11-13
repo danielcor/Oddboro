@@ -48,6 +48,7 @@ import {
   SYSTEM,
   WINDOWS,
   home,
+  hostEnv,
   installService,
   powershell,
   type System
@@ -121,7 +122,9 @@ export type Address = { host: string } & (
 
 const run = (cmd: string, args: string[]) =>
   new Promise<{ ok: boolean; out: string }>((done) =>
-    execFile(cmd, args, { timeout: 120_000 }, (e, out) => done({ ok: !e, out: String(out ?? '') }))
+    execFile(cmd, args, { env: hostEnv(), timeout: 120_000 }, (e, out) =>
+      done({ ok: !e, out: String(out ?? '') })
+    )
   );
 
 const get = (url: string, init?: RequestInit) =>

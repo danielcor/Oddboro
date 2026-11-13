@@ -9,7 +9,7 @@
 // One picker at a time, closed after five minutes. Server only.
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { currentPlatform } from '@oddboro/ledger/platform';
+import { currentPlatform, hostEnv } from '@oddboro/ledger/platform';
 import { onPath } from './on-path.ts';
 
 export type Picked = { path: string } | { cancelled: true } | { unavailable: string };
@@ -95,7 +95,7 @@ export async function pickFolder(prompt: string): Promise<Picked> {
           dialog.cmd,
           dialog.args,
           {
-            env: { ...process.env, ...dialog.env },
+            env: { ...hostEnv(), ...dialog.env },
             timeout: WAIT_MS,
             windowsHide: true,
             encoding: 'utf8'

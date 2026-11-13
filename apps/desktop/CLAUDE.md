@@ -161,12 +161,22 @@ not start or keep running, 7 no window. 0 is a quit.
   never touches Caddy.
 - Node's stdout is a pipe too. A line `oddboro:notify <title>\t<text>` is a
   notification, which the shell shows as Oddboro's: `mac-notification-sys`
-  with the Glass sound on a Mac, `notify-send --app-name=Oddboro` on Linux,
-  and a toast through `tauri-winrt-notification` on Windows, under the app's
-  identifier, which the installer gives its Start menu shortcut. A
-  line `oddboro:update-check` is the owner's Check now. A line
+  with the Glass sound on a Mac, and a toast through
+  `tauri-winrt-notification` on Windows, under the app's identifier, which
+  the installer gives its Start menu shortcut. On Linux the shell calls
+  `org.freedesktop.Notifications.Notify` on the session bus, with app name
+  Oddboro and the hint `desktop-entry=oddboro`. When that call fails it runs
+  `notify-send --app-name=Oddboro --hint=string:desktop-entry:oddboro`. If
+  both fail, the office log gets one line with the exit code and stderr.
+  A line `oddboro:update-check` is the owner's Check now. A line
   `oddboro:secret <json>` asks for the Keychain (below). Every other line goes
   to the log.
+- A host program the shell starts on Linux (`systemd-inhibit`, `xdg-open`,
+  `secret-tool`, and `notify-send`) gets the host's library path from
+  `src-tauri/src/host.rs`. Inside an AppImage `LD_LIBRARY_PATH` points at the
+  glib the bundle carries, which is older than the host's libnotify, so those
+  programs fail to start. `host.rs` drops that path, or puts back the values
+  the runtime saved, and takes the AppImage's folders off `PATH`.
 - The Keychain, on a Mac (`src-tauri/src/secrets.rs`). The office sends
   `oddboro:secret {"id":n,"op":"list"|"legacy"|"set"|"remove","account":"...","value":"..."}`
   and the shell answers on Node's stdin with one line, `{"id":n,"ok":true,...}`
@@ -238,6 +248,8 @@ Every update is required. `src-tauri/src/update.rs` runs them with
   sending.
 - `src-tauri/src/server.rs`. Starting, watching, restarting and stopping Node.
 - `src-tauri/src/env.rs`. Port, home, log path and the login-shell PATH.
+- `src-tauri/src/host.rs`. The environment a host program gets inside an
+  AppImage.
 - `src-tauri/src/secrets.rs`. The office's secrets in the Mac's Keychain, and
   the line protocol it asks with.
 - `src-tauri/src/update.rs`. Checking, downloading and installing updates,

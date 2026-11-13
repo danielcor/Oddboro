@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -325,7 +325,7 @@ fn read_sign_in() -> Option<String> {
         return keychain_sign_in();
     }
     let (program, args) = sign_in_command()?;
-    let read = Command::new(program)
+    let read = crate::host::host_command(program)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -545,6 +545,7 @@ mod tests {
     use crate::server::Server;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::sync::mpsc::Receiver;
 
     /// Words from an owner's office that must never reach a report.

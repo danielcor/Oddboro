@@ -2,7 +2,7 @@
 // with the office closed: a staffer's ping, or the setup test. While the tab
 // is open the browser shows its own (Notification API), on every system.
 //
-// In the Mac app the server asks the app on stdout, one line each, and macOS
+// In the app the server asks the shell on stdout, one line each, and the shell
 // shows it as Oddboro's (apps/desktop/src-tauri/src/server.rs). Run from the
 // repo, each system has its own way, in the table below: osascript on a Mac
 // (which macOS shows as Script Editor's, so Script Editor has to be allowed in
@@ -10,9 +10,11 @@
 // desktop that follows the freedesktop notification spec shows, and a toast
 // on Windows through PowerShell. A toast has to name an app Windows knows, and
 // the repo installs none, so it shows as Windows PowerShell's, the way a Mac
-// shows Script Editor's.
+// shows Script Editor's. A failure is one line on the office's stderr, which
+// the app keeps in its log: the exit code and what the program wrote.
 import { execFile } from 'node:child_process';
-import { IN_APP, SYSTEM, openUrl, powershell, type System } from '@oddboro/ledger';
+import { IN_APP } from '@oddboro/ledger/home';
+import { hostEnv, openUrl, powershell, SYSTEM, type System } from '@oddboro/ledger/platform';
 
 // The words come in as environment variables and are escaped for XML inside.
 const TOAST = `
@@ -27,8 +29,25 @@ $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powersh
 /** One line: no tab or line break may reach the app inside the words. */
 const flat = (s: string) => s.replace(/[\t\r\n]+/g, ' ');
 
+/** One line for the log: the exit code, then stderr with the line breaks taken out. */
+const failed = (cmd: string, code: unknown, stderr: unknown) => {
+  const exit = code == null || code === '' ? 'error' : String(code);
+  const said = String(stderr ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 300);
+  return said
+    ? `notify failed: ${cmd} exited ${exit}: ${said}`
+    : `notify failed: ${cmd} exited ${exit}`;
+};
+
 const run = (cmd: string, args: string[]) =>
-  new Promise<boolean>((done) => execFile(cmd, args, (e) => done(!e)));
+  new Promise<boolean>((done) =>
+    execFile(cmd, args, { env: hostEnv() }, (error, _stdout, stderr) => {
+      if (error) console.error(`office: ${failed(cmd, error.code, stderr)}`);
+      done(!error);
+    })
+  );
 
 const NOTIFY: Record<System, ((title: string, message: string) => Promise<boolean>) | undefined> = {
   // Arguments, not a script string, so the words need no escaping.
@@ -43,9 +62,19 @@ const NOTIFY: Record<System, ((title: string, message: string) => Promise<boolea
       message,
       title
     ]),
-  linux: (title, message) => run('notify-send', ['--app-name', 'Oddboro', title, message]),
-  windows: async (title, message) =>
-    (await powershell(TOAST, { ODDBORO_TITLE: title, ODDBORO_MESSAGE: message })).ok
+  linux: (title, message) =>
+    run('notify-send', [
+      '--app-name=Oddboro',
+      '--hint=string:desktop-entry:oddboro',
+      '--',
+      title,
+      message
+    ]),
+  windows: async (title, message) => {
+    const sent = await powershell(TOAST, { ODDBORO_TITLE: title, ODDBORO_MESSAGE: message });
+    if (!sent.ok) console.error(`office: ${failed('powershell.exe', sent.code, sent.err)}`);
+    return sent.ok;
+  }
 };
 
 /** Where each system lets the owner allow notifications. Linux has no one place, so none. */
