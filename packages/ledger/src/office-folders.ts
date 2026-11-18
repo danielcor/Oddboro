@@ -22,8 +22,9 @@ import { record } from './office-ledger.ts';
  * is what is stored. A folder taken back is the path as stored, unchecked, so
  * a folder deleted from the disk can still be taken back. A folder is the same one
  * when its real path is (`real`), so a level change replaces it, even one
- * stored in another case. A new folder inside or holding one the Odd already
- * has is refused (`FOLDER_REFUSED.nested`): one would carry two levels. A
+ * stored in another case. Folders may sit one inside another, but a folder
+ * only to read is refused inside or around one to change
+ * (`FOLDER_REFUSED.readInsideChange`, `nestRefused`). A
  * stored folder no run gets (`touchesSecretStore`) carries none, so the owner
  * can give a clean folder inside it. It still counts against a folder that
  * would hold it, which would put the store it was dropped for in a run. A
@@ -65,11 +66,10 @@ async function changeFolder(
   const write = access === 'write';
   if (access === null ? !had : had?.write === write) return;
   const rest = before.folders.filter((f) => !same(f));
-  if (
-    access !== null &&
-    rest.some((f) => (touchesSecretStore(f.path) ? within(real(f.path), at) : nests(at, f)))
-  )
-    return { refused: FOLDER_REFUSED.nested };
+  if (access !== null) {
+    const refused = nestRefused(rest, at, write);
+    if (refused) return { refused };
+  }
   const folders = access === null ? rest : [...rest, { path, write }];
   await q.update(staff).set({ folders }).where(eq(staff.id, id));
   return {
@@ -84,15 +84,39 @@ async function changeFolder(
 const gaveFolder = (name: string, path: string, access: FolderAccess) =>
   `Let ${name} ${access === 'write' ? 'read and change' : 'read'} ${shownFolder(path)}`;
 
-/** Whether `at` (a real path) sits inside the stored folder `f`, or holds it. */
-const nests = (at: string, f: { path: string }) =>
-  within(at, real(f.path)) || within(real(f.path), at);
+/**
+ * Why a folder at `at` (a real path), to change when `write`, may not sit
+ * beside the stored folders `others`, or nothing when it may. Folders may sit
+ * one inside another: a run reads them all and changes those to change, as it
+ * reads a work's folder and changes only its own part. The one pair refused is
+ * a folder only to read inside one to change (`FOLDER_REFUSED.readInsideChange`):
+ * every tool lets a run change all of the outer one, so the inner one could
+ * not stay read only. A stored folder no run gets (`touchesSecretStore`) still
+ * counts against a folder that would hold it, which would put its store in a
+ * run (`FOLDER_REFUSED.nested`).
+ */
+function nestRefused(
+  others: { path: string; write: boolean }[],
+  at: string,
+  write: boolean
+): string | undefined {
+  for (const f of others) {
+    const p = real(f.path);
+    if (touchesSecretStore(f.path)) {
+      if (within(p, at)) return FOLDER_REFUSED.nested;
+      continue;
+    }
+    if ((within(at, p) && f.write && !write) || (within(p, at) && write && !f.write))
+      return FOLDER_REFUSED.readInsideChange;
+  }
+  return undefined;
+}
 
 /**
  * Why an Odd may not ask for `path` (a real path from `checkFolder`) at
  * `level`, or nothing when it may: it has that folder, or one holding it,
- * at that level or above; or the owner could not give it, since it sits
- * inside or holds another folder the Odd has (`setFolder`). A stored folder
+ * at that level or above; or the owner could not give it beside the folders
+ * it has (`nestRefused`, as in `setFolder`). A stored folder
  * no run gets (`touchesSecretStore`) never covers what is asked for, so the
  * Odd is never told that a folder it does not get covers it, and a clean
  * folder inside one can be asked for. It still counts against a folder that
@@ -108,11 +132,11 @@ export function folderAskRefused(
   const covers = held.find((f) => within(at, real(f.path)) && (f.write || level === 'read'));
   if (covers)
     return `You already have ${shownFolder(covers.path)} (${covers.write ? 'read and change' : 'read only'}), which covers it.`;
-  const nested = who.folders.some(
-    (f) =>
-      real(f.path) !== at && (touchesSecretStore(f.path) ? within(real(f.path), at) : nests(at, f))
+  return nestRefused(
+    who.folders.filter((f) => real(f.path) !== at),
+    at,
+    level === 'write'
   );
-  if (nested) return FOLDER_REFUSED.nested;
 }
 
 /**
@@ -137,10 +161,6 @@ export const switchesOff = (
   wanted: readonly OwnSwitch[]
 ): OwnSwitch[] => wanted.filter((s) => !who[s]);
 
-/** The ledger's words for turning switches on: "Let Theo run commands and browse the web". */
-const turnedOn = (name: string, on: readonly OwnSwitch[]) =>
-  `Let ${name} ${switchesSaid(on).toLowerCase()}`;
-
 /**
  * Secret stores, by name, each with how it is found anywhere but the top of
  * the home, where the name alone is enough (`touchesSecretStore`). An empty
@@ -152,10 +172,20 @@ const turnedOn = (name: string, on: readonly OwnSwitch[]) =>
  * none of, so that system folder stays a warning. `.ssh` and `.aws` leave out
  * `config` on purpose, since a project may well hold one.
  *
+ * Linux keeps its browsers' and keyrings' secrets in folders of their own:
+ * Firefox's profiles in `.mozilla`, the desktop's keyrings in
+ * `.local/share/keyrings`, Chrome's certificate store in `.pki`, and the
+ * profiles of a browser installed by snap or Flatpak under `snap` and
+ * `.var/app`. A key may be a path under the home, written with `/`: the deny
+ * lists join the whole key to the home, and a folder is a store by its own
+ * name, the key's last segment. Only the keyrings are listed under `.local`,
+ * not `.local` itself, because `~/.local/bin` holds tools a run must reach. A
+ * folder that holds a store is still refused, so `~/.local` is.
+ *
  * Where the check stops (`inOrHoldsStore`): the folder, the folders above it
- * and one level down. A store deeper than that, or under another name, is not
- * found, and a `.ssh` with only custom-named keys and no `known_hosts` is given
- * anywhere but the top of the home.
+ * and each key's path below it. A store deeper than that, or under another
+ * name, is not found, and a `.ssh` with only custom-named keys and no
+ * `known_hosts` is given anywhere but the top of the home.
  */
 export const STORE_MARKS: Record<string, string[]> = {
   '.ssh': [
@@ -180,7 +210,12 @@ export const STORE_MARKS: Record<string, string[]> = {
   '.codex': ['auth.json', 'sessions'],
   '.gemini': ['oauth_creds.json', 'google_accounts.json'],
   '.docker': ['config.json'],
-  '.kube': ['config']
+  '.kube': ['config'],
+  '.mozilla': ['firefox'],
+  '.local/share/keyrings': ['login.keyring', 'user.keystore'],
+  '.pki': ['nssdb'],
+  snap: ['firefox', 'chromium'],
+  '.var/app': ['org.mozilla.firefox', 'com.google.Chrome', 'org.chromium.Chromium']
 };
 
 /**
@@ -199,7 +234,9 @@ export const FOLDER_REFUSED = {
   home: 'Pick a folder inside your home, not the whole home.',
   secrets: 'That folder holds your keys or sign-ins.',
   code: "That folder holds Oddboro's own code.",
-  nested: 'That folder is inside one this Odd already has, or holds one.',
+  nested: "That folder holds one of this Odd's folders that has your keys or sign-ins.",
+  readInsideChange:
+    "A folder on Can read can't sit inside one on Can write. This Odd can already change everything in it.",
   /** What an Odd reads when it asks for a whole drive or system files: only the owner may give one. */
   broad: 'That folder is a whole drive or holds system files. Ask for a narrower one.',
   glob: (char: string) => `That folder's path has a character an Odd's tool can't take: ${char}`
@@ -212,18 +249,23 @@ export const FOLDER_REFUSED = {
 export const FOLDER_WARNING =
   "This folder is a whole drive or holds system files, so an Odd could reach everything inside it. We don't recommend giving it.";
 
-/** Whether `p` is a secret store by `STORE_MARKS`. */
+/**
+ * Whether `p` is a secret store by `STORE_MARKS`. By its own folder's name, a
+ * key's last segment, so `keyrings` anywhere is `.local/share/keyrings`.
+ */
 function marksStore(p: string): boolean {
   const name = basename(p).toLowerCase();
-  const marks = Object.entries(STORE_MARKS).find(([store]) => store.toLowerCase() === name)?.[1];
+  const marks = Object.entries(STORE_MARKS).find(
+    ([store]) => basename(store).toLowerCase() === name
+  )?.[1];
   return !!marks && existsSync(p) && (!marks.length || marks.some((m) => existsSync(join(p, m))));
 }
 
 /**
  * Whether `p` is in a secret store or holds one directly (`STORE_MARKS`).
- * Folders deeper than one level down are not looked at, so giving one is
- * never a walk of a whole drive, and a store renamed to another folder name
- * cannot be found at all.
+ * Below `p` only each key's own path is looked at, so giving one is never a
+ * walk of a whole drive, and a store renamed to another folder name cannot be
+ * found at all.
  */
 function inOrHoldsStore(p: string): boolean {
   for (let at = p; dirname(at) !== at; at = dirname(at)) if (marksStore(at)) return true;
@@ -351,4 +393,4 @@ export function checkFolder(
   return { real: p };
 }
 
-export { changeFolder, gaveFolder, turnedOn };
+export { changeFolder, gaveFolder };

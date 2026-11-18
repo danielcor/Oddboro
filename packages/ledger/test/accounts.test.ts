@@ -19,7 +19,6 @@ import { db } from './pglite.ts';
 const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'accounts-')));
 process.env.HOME = HOME;
 process.env.ODDBORO_HOME = join(HOME, '.oddboro');
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 after(() => rmSync(HOME, { recursive: true, force: true }));
 const A = await import('../src/accounts.ts');
 const { chatSession, home } = await import('../src/home.ts');

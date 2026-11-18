@@ -2,6 +2,7 @@
 // office's own code runs against it. A test file imports this before it loads
 // any module that imports db.ts, and runs with
 // `--experimental-test-module-mocks`, as `npm test -w @oddboro/ledger` does.
+import { readFileSync } from 'node:fs';
 import { after, mock } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
@@ -10,7 +11,13 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import * as schema from '../src/schema.ts';
 
-const client = await PGlite.create({ extensions: { vector } });
+// The run's migrated database when global-setup.ts made one; migrate() below
+// then finds nothing to apply.
+const made = process.env.ODDBORO_TEST_DATABASE;
+const client = await PGlite.create({
+  extensions: { vector },
+  ...(made && { loadDataDir: new Blob([readFileSync(`${made}.tar`)]) })
+});
 await client.exec('create extension if not exists vector');
 export const db = drizzle(client, { schema, casing: 'snake_case' });
 await migrate(db, { migrationsFolder: fileURLToPath(new URL('../migrations', import.meta.url)) });

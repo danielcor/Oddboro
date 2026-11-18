@@ -56,6 +56,8 @@ export type ChatEntry = {
   choices?: string[];
   /** On a reply: the bug report its run drafted (`draft_bug_report`), which File this opens in the report form. */
   bug?: BugDraft;
+  /** Shows the existing Updates controls under this reply. It authorizes no installation. */
+  updates?: true;
 };
 export type ChatSignIn = { agent: Agent; account: string; how: 'key' | 'browser' };
 
@@ -64,5 +66,5 @@ export type ChatEvent =
   | { type: 'reply'; runId: string; turnId: string }
   | { type: 'delta'; text: string }
   | { type: 'tool'; name: string }
-  | { type: 'done'; text: string; choices?: string[]; bug?: BugDraft }
+  | { type: 'done'; text: string; choices?: string[]; bug?: BugDraft; updates?: true }
   | { type: 'error'; message: string; signIn?: ChatSignIn };

@@ -35,9 +35,7 @@ Object.assign(process.env, {
   ODDBORO_DB_PORT: String(port),
   // A file that does not exist, so no .env reaches this office.
   ODDBORO_ENV: join(folder, 'none.env'),
-  DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,
-  ODDBORO_LOCAL_DB: '1',
-  OLLAMA_URL: 'http://127.0.0.1:9'
+  ODDBORO_LOCAL_DB: '1'
 });
 delete process.env.OFFICE_AUTH;
 // The system opener never runs here. The ledger's openFile, which the open
@@ -388,9 +386,14 @@ after(() => Promise.all(servers.map((c) => c.close())));
 async function lenasTools() {
   const client = new Client({ name: 'test', version: '1.0.0' });
   const env = Object.fromEntries(
-    ['PATH', 'ODDBORO_HOME', 'ODDBORO_DB_PORT', 'ODDBORO_ENV', 'DATABASE_URL', 'ODDBORO_LOCAL_DB']
-      .concat('OLLAMA_URL')
-      .map((k) => [k, process.env[k] ?? ''])
+    [
+      'PATH',
+      'ODDBORO_HOME',
+      'ODDBORO_DB_PORT',
+      'ODDBORO_ENV',
+      'DATABASE_URL',
+      'ODDBORO_LOCAL_DB'
+    ].map((k) => [k, process.env[k] ?? ''])
   );
   await client.connect(
     new StdioClientTransport({

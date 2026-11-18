@@ -37,3 +37,17 @@ export const TRACKS: Track[] = [
 export const OPENING = 'good-morning-neighbor';
 
 export const trackSrc = (id: string): string => `/audio/${id}.m4a`;
+
+/**
+ * Filtered pink noise for concentration, a 32 second loop. It plays on its
+ * own, outside the shuffle. Made with ffmpeg alone, no recording: 34 seconds
+ * of noise, filtered, then the last 2 crossfaded into the first 2, so the end
+ * runs straight into the start.
+ *
+ *   ffmpeg -f lavfi -i 'anoisesrc=color=pink:amplitude=0.30:sample_rate=24000:seed=104729:duration=35'
+ *     -filter_complex '[0:a]highpass=f=70,lowpass=f=2200,atrim=start=1:end=35,asetpts=PTS-STARTPTS,
+ *       asplit=2[s1][s2];[s1]atrim=start=2:end=34,asetpts=PTS-STARTPTS[a];
+ *       [s2]atrim=start=0:end=2,asetpts=PTS-STARTPTS[b];[a][b]acrossfade=d=2:c1=qsin:c2=qsin[out]'
+ *     -map '[out]' -ac 1 -c:a aac -b:a 48k -movflags +faststart -map_metadata -1 focus-noise.m4a
+ */
+export const FOCUS_NOISE = '/sounds/focus-noise.m4a';

@@ -88,7 +88,7 @@ The License lets you do a great deal with the code. It does not make any of the 
 
 ## 7. Third-party services
 
-The Software connects to services run by other companies, at your direction: Anthropic, Ollama, GitHub, the npm and PyPI registries, the MCP Registry, and any tool you connect through an Odd's request. We do not control those services. We are not responsible for their availability, their behavior, their terms, their fees, their privacy practices or anything they do with your data. A change on their side may break a feature on ours, and we may not be able to fix it.
+The Software connects to services run by other companies, at your direction: Anthropic, GitHub (which also serves the app's updates and, once, when you turn on ledger search, the search model from Oddboro's own releases), the npm and PyPI registries, the MCP Registry, and any tool you connect through an Odd's request. We do not control those services. We are not responsible for their availability, their behavior, their terms, their fees, their privacy practices or anything they do with your data. A change on their side may break a feature on ours, and we may not be able to fix it.
 
 Tools you add from the MCP Registry or elsewhere are software written by other people. Read what a tool does before you approve it, and treat it with the same care as anything else you install.
 

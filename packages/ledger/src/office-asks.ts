@@ -2,10 +2,12 @@
 // answer covers.
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from './db.ts';
-import { goalThread, keepRun, raisedOn, type Db, type Tx } from './threads.ts';
+import { goalThread, type Db, type Tx } from './threads.ts';
+import { fixedError } from './errors.ts';
+import { runAfters } from './transition.ts';
+import { transitionWork } from './work/apply.ts';
 import {
   asks,
-  attachments,
   tasks,
   type AccessRequest,
   type AskKind,
@@ -18,13 +20,13 @@ import {
   type ReplyDraft,
   type StandingRequest
 } from './schema.ts';
-import { levelAtMost, switchesSaid, type OwnSwitch } from './access-words.ts';
+import { switchesSaid, type Level, type OwnSwitch } from './access-words.ts';
+import { type OfficeToolId } from './tools.ts';
 import { sameCriteria, type GmailFilter } from './filter-words.ts';
-import { ASK_REPLACED } from './desk-answers.ts';
 import type { AskRow, LedgerRow } from './office.ts';
 import { precedent } from './office-ledger.ts';
 import { followUp } from './office-follow-ups.ts';
-import { mediaTypeOf } from './office-tasks.ts';
+import { TWINS, asksNoMore, carriedOutBy, resumesWork } from './work/twins.ts';
 
 // Asks
 
@@ -256,9 +258,6 @@ async function refuseSecondStanding(
     );
 }
 
-/** The asks an Odd raises in its own words, which may not repeat one already open. Access asks have twins instead (`asksNoMore`). */
-const ONCE_ONLY: AskKind[] = ['approval', 'goal', 'remove', 'bring_back'];
-
 export async function raiseAsk(
   staffId: string,
   a: {
@@ -277,24 +276,18 @@ export async function raiseAsk(
     folder?: FolderRequest;
     /** A switch ask's switches (`ask_for_switch`). */
     switches?: OwnSwitch[];
+    /** A level ask's level (`ask_for_level`). */
+    level?: Level;
+    /** An office_tool ask's office tools (`ask_for_office_tool`). */
+    officeTools?: OfficeToolId[];
     /** A call ask's held call, from the gateway (`holdCall` in the office's gateway.ts). */
     call?: HeldCall;
     /** A remove or bring_back ask's Odd (leaving.ts). */
     odd?: string;
     /** A standing ask's tools (`ask_for_standing_yes`, standing.ts). */
     standing?: StandingRequest;
-    /** `goal`, `plan`, `reply`, `filter`, `folder`, `switch`, `call`, `remove`, `bring_back` and `standing` say so; the rest follow from access or hire. */
-    kind?:
-      | 'goal'
-      | 'plan'
-      | 'reply'
-      | 'filter'
-      | 'folder'
-      | 'switch'
-      | 'call'
-      | 'remove'
-      | 'bring_back'
-      | 'standing';
+    /** Every kind but these says so; `approval`, `access` and `hire` follow from access or hire, and the office raises `hand_offs`, `window` and `catch_up` itself. */
+    kind?: Exclude<AskKind, 'approval' | 'access' | 'hire' | 'hand_offs' | 'window' | 'catch_up'>;
     revises?: number;
     /** The colleague whose handed-back work the lead raised this from (`VIA`). */
     via?: string;
@@ -310,23 +303,64 @@ export async function raiseAsk(
      * thread passes none, since its own follow-up already holds the hub.
      */
     run?: string;
-  }
-): Promise<{ ask: AskRow; precedent: LedgerRow[] }> {
+  },
+  q: Db = db
+): Promise<{ ask: AskRow; precedent: LedgerRow[]; already: boolean }> {
   const { attach, run, ...fields } = a;
   const kind = a.kind ?? (a.access ? 'access' : a.hire ? 'hire' : 'approval');
-  const ask = await db.transaction(async (tx) => {
+  const raise = async (tx: Tx) => {
     // An Odd's own ask may not repeat one on the desk, a reply may not
     // answer an email twice, and a filter may not file the same mail twice.
-    // A folder or switch ask may not repeat one from the same place.
-    // Office-raised kinds and access twins are left alone.
-    if (ONCE_ONLY.includes(kind) || a.reply || a.filter || a.folder || a.switches || a.standing) {
-      await lockDesk(tx, staffId);
-      if (a.reply) await refuseSecondReply(tx, staffId, a.reply, a.revises);
-      else if (a.filter) await refuseSecondFilter(tx, staffId, a.filter, a.revises);
-      else if (a.folder) await refuseSecondFolder(tx, staffId, { ...a, folder: a.folder });
-      else if (a.switches) await refuseSecondSwitch(tx, staffId, { ...a, switches: a.switches });
-      else if (a.standing) await refuseSecondStanding(tx, staffId, a.standing, a.revises);
-      else await refuseRepeat(tx, staffId, a.title, a.revises);
+    // A folder, switch or standing ask may not repeat one from the same place. Access,
+    // level and office tool asks have twins instead (`asksNoMore`), and the rest are the office's
+    // own or checked where they are made. The office raises `hand_offs`,
+    // `window` and `catch_up` asks itself, never through here. A new kind fails the type
+    // check here until it says which.
+    switch (kind) {
+      case 'approval':
+      case 'goal':
+      case 'remove':
+      case 'bring_back':
+        await lockDesk(tx, staffId);
+        await refuseRepeat(tx, staffId, a.title, a.revises);
+        break;
+      case 'reply':
+        if (!a.reply) break;
+        await lockDesk(tx, staffId);
+        await refuseSecondReply(tx, staffId, a.reply, a.revises);
+        break;
+      case 'filter':
+        if (!a.filter) break;
+        await lockDesk(tx, staffId);
+        await refuseSecondFilter(tx, staffId, a.filter, a.revises);
+        break;
+      case 'folder':
+        if (!a.folder) break;
+        await lockDesk(tx, staffId);
+        await refuseSecondFolder(tx, staffId, { ...a, folder: a.folder });
+        break;
+      case 'switch':
+        if (!a.switches) break;
+        await lockDesk(tx, staffId);
+        await refuseSecondSwitch(tx, staffId, { ...a, switches: a.switches });
+        break;
+      case 'standing':
+        if (!a.standing) break;
+        await lockDesk(tx, staffId);
+        await refuseSecondStanding(tx, staffId, a.standing, a.revises);
+        break;
+      case 'call':
+        // A held call the core finds open already, under this lock, so two at once raise one.
+        if (a.call) await lockDesk(tx, staffId);
+        break;
+      case 'access':
+      case 'level':
+      case 'office_tool':
+      case 'hire':
+      case 'plan':
+        break;
+      default:
+        kind satisfies never;
     }
     // A plan goes on its goal's one thread, whatever run raised it: a chat,
     // the weekly review, or the goal's own planning run. So approving it
@@ -334,37 +368,37 @@ export async function raiseAsk(
     const on = a.plan
       ? { handOffId: undefined, threadId: await goalThread(tx, a.plan.goalId, staffId) }
       : {};
-    const [row] = await tx
-      .insert(asks)
-      .values({
-        staffId,
-        ...fields,
-        kind,
-        ...on
-      })
-      .returning();
-    // A new version the Odd made of its own ask, still open, takes its place
-    // on the desk: the old one closes as replaced, so the owner sees one.
-    if (a.revises)
-      await tx
-        .update(asks)
-        .set({ status: 'revise', reason: ASK_REPLACED, decidedAt: new Date() })
-        .where(and(eq(asks.id, a.revises), eq(asks.staffId, staffId), eq(asks.status, 'open')));
-    if (row.threadId) {
-      // The thread keeps the run's key, so the owner's answer cannot start the
-      // hub there while the run that raised it, such as a chat, still goes.
-      await keepRun(tx, row.threadId, { key: run, by: staffId });
-      await raisedOn(tx, row.threadId, { plan: !!a.plan });
-    }
-    if (attach?.length)
-      await tx
-        .insert(attachments)
-        .values(
-          attach.map((path) => ({ staffId, path, mediaType: mediaTypeOf(path), askId: row.id }))
-        );
-    return row;
-  });
-  return { ask, precedent: await precedent(`${a.title}\n${a.why}`) };
+    const went = await transitionWork(
+      { kind: 'askRaised', ask: { staffId, ...fields, kind, ...on }, attach, run },
+      { tx }
+    );
+    if ('refused' in went) return went;
+    const already = went.change.result?.already;
+    const row = await ask(already ?? went.real({ ref: 'ask' }), tx);
+    if (!row) throw fixedError('An ask was raised that is not there.');
+    return { row, already: already !== undefined, after: went.after };
+  };
+  // A caller's transaction owns the commit: the ask goes in with the rest of
+  // its writes, and raising one leaves nothing for after it (`askRaised`).
+  // Nothing here could run an after-effect once that commits, so one fails
+  // the caller's transaction rather than be lost.
+  const inCallers = 'rollback' in q;
+  const raised = inCallers ? await raise(q) : await db.transaction(raise);
+  if ('refused' in raised) throw new Error(raised.refused);
+  if (inCallers && raised.after.length)
+    throw fixedError(
+      "Raising an ask left work for after it, which a caller's transaction cannot run."
+    );
+  if (!inCallers) await runAfters('askRaised', raised.after);
+  const { row, already } = raised;
+  // A repeat of a held call is the one there, whose precedent the Odd already
+  // had. One the office raises in its own transaction, as a plan's hires, no
+  // Odd reads, and its precedent is read outside that transaction.
+  return {
+    ask: row,
+    precedent: already || inCallers ? [] : await precedent(`${a.title}\n${a.why}`),
+    already
+  };
 }
 
 export async function ask(id: number, q: Db = db): Promise<AskRow | undefined> {
@@ -384,82 +418,21 @@ export async function asksFor(staffId: string): Promise<AskRow[]> {
 export const DECISIONS = ['approve', 'deny', 'iterate'] as const;
 export type Decision = (typeof DECISIONS)[number];
 
-/** The kinds of ask that have twins (`asksNoMore`): an outside tool, a folder, and switches. */
-const TWINNED: AskKind[] = ['access', 'folder', 'switch'];
-
 /**
- * Whether `later` asks for nothing `first` does not: the same Odd, the same
- * tool or folder, at the same level or lower. Asks for another Google account
- * of one product are the same tool. Two runs of one Odd can each find a tool
- * or a folder missing at once (a hire's first day and its lead's first
- * hand-off), and each raises its own ask. The owner sees the first alone
- * (`desk`), and their answer to it answers the twin too (`decide`), each back
- * where it came from.
- */
-function asksNoMore(first: AskRow, later: AskRow): boolean {
-  if (first.id === later.id || first.staffId !== later.staffId) return false;
-  if (first.kind === 'access' && later.kind === 'access' && first.access && later.access)
-    return (
-      first.access.another === later.access.another &&
-      (!!first.access.another || first.access.connector === later.access.connector) &&
-      levelAtMost(later.access.level, first.access.level)
-    );
-  if (first.kind === 'folder' && later.kind === 'folder' && first.folder && later.folder)
-    return (
-      first.folder.path === later.folder.path &&
-      (first.folder.level === 'write' || later.folder.level === 'read')
-    );
-  if (first.kind === 'switch' && later.kind === 'switch')
-    return (later.switches ?? []).every((s) => first.switches?.includes(s));
-  return false;
-}
-
-/** Whether two asks of one kind ask for the same tool or folder, whatever the level. */
-const sameWanted = (a: AskRow, b: AskRow) =>
-  a.kind === 'folder'
-    ? a.folder?.path === b.folder?.path
-    : a.kind === 'switch'
-      ? (b.switches ?? []).every((s) => a.switches?.includes(s))
-      : a.access?.connector === b.access?.connector;
-
-/**
- * The other access or folder asks the owner's one answer settled with `a`:
- * the same Odd and tool or folder, decided in the same moment, whichever of
- * them the owner saw.
+ * The other asks of `a`'s kind the owner's one answer settled with it: the
+ * same Odd and the same thing wanted (`TWINS`), decided in the same moment,
+ * whichever of them the owner saw.
  */
 export async function answeredWith(a: AskRow, q: Db = db): Promise<AskRow[]> {
-  if (!TWINNED.includes(a.kind) || !a.decidedAt) return [];
+  const twin = TWINS[a.kind];
+  if (!twin || !a.decidedAt) return [];
   const rows = await q
     .select()
     .from(asks)
     .where(
       and(eq(asks.staffId, a.staffId), eq(asks.kind, a.kind), eq(asks.decidedAt, a.decidedAt))
     );
-  return rows.filter((r) => r.id !== a.id && r.status === a.status && sameWanted(a, r));
-}
-
-/**
- * Which of the asks one answer settled start a `carry_out`: one for each place
- * a result must go back to, never one per ask. A hand-off's twin comes first,
- * then a thread's; a twin on neither starts a run only when no other does.
- * Two runs of one Odd once each did the same work after one answer, and the
- * owner got every email reply twice.
- */
-function carriedOutBy(together: AskRow[]): AskRow[] {
-  const rank = (a: AskRow) => (a.handOffId ? 0 : a.threadId ? 1 : 2);
-  const places = new Set<string>();
-  const runs: AskRow[] = [];
-  for (const a of [...together].sort((x, y) => rank(x) - rank(y) || x.id - y.id)) {
-    const place = a.handOffId
-      ? `hand-off ${a.handOffId}`
-      : a.threadId
-        ? `thread ${a.threadId}`
-        : '';
-    if (places.has(place) || (place === '' && runs.length)) continue;
-    places.add(place);
-    runs.push(a);
-  }
-  return runs;
+  return rows.filter((r) => r.id !== a.id && r.status === a.status && twin.same(a, r));
 }
 
 /**
@@ -492,7 +465,7 @@ export async function standsFor(a: AskRow): Promise<AskRow[]> {
   const together = [a, ...(await answeredWith(a))];
   const runs = carriedOutBy(together);
   if (runs[0]?.id !== a.id) return [];
-  return together.filter((x) => !runs.some((r) => r.id === x.id));
+  return together.filter((x) => resumesWork(x) && !runs.some((r) => r.id === x.id));
 }
 
-export { lockDesk, refuseRepeat, TWINNED, asksNoMore, carryOutTogether };
+export { lockDesk, refuseRepeat, TWINS, asksNoMore, carryOutTogether };

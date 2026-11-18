@@ -46,7 +46,6 @@ test("the owner's words that pick up work parked on a time tell the lead's run t
   const told = await L.tellLead({
     staffId: 'paige',
     threadId: thread,
-    owner: 'Sam',
     said,
     words: said,
     reading: 'Sam wants it now.'

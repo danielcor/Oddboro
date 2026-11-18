@@ -157,7 +157,11 @@ test('Create filter makes the missing label, tidies the matching mail in pages, 
       `Created a Gmail filter: mail from ${from} will skip the inbox, be marked read and get the label "Newsletters", and tidied 1200 emails`
     ]
   );
-  assert.equal((await L.pg`select 1 from follow_ups where ask_id = ${id}`).length, 0);
+  // No run carries a filter out: the office already did. On no work, the Odd hears so, once.
+  assert.deepEqual(
+    [...(await L.pg`select kind from follow_ups where ask_id = ${id}`)],
+    [{ kind: 'answered' }]
+  );
 });
 
 test('a label that exists is used as it is, and without tidy no mail changes', async () => {

@@ -92,12 +92,14 @@ export const DATA_COLLECTION = {
  * Never traced. The event streams stay open with the page or terminal, and
  * the terminal posts each input to its command route. The
  * shell asks for updates every 30 seconds, so a trace there would send
- * reports while the owner is away. The relay would trace itself in a loop.
+ * reports while the owner is away, and asks for the key's proof every half
+ * second while Node starts. The relay would trace itself in a loop.
  */
 export const QUIET_ROUTES: ReadonlySet<string> = new Set<RouteId>([
   '/api/events',
   '/api/project-sessions',
   '/api/project-sessions/[id]/events',
+  '/api/proof',
   '/api/update',
   '/api/diagnostics/envelope'
 ]);
@@ -113,6 +115,7 @@ export const ROUTE_IDS = {
   '/account/callback': true,
   '/api/account': true,
   '/api/accounts': true,
+  '/api/act-check': true,
   '/api/agents': true,
   '/api/agents/[tool]': true,
   '/api/asks/[id]': true,
@@ -123,6 +126,9 @@ export const ROUTE_IDS = {
   '/api/asks/[id]/folder': true,
   '/api/asks/[id]/original': true,
   '/api/asks/[id]/reply': true,
+  '/api/backup': true,
+  '/api/backup/restore': true,
+  '/api/browser-link': true,
   '/api/client-log': true,
   '/api/connectors': true,
   '/api/diagnostics': true,
@@ -156,6 +162,7 @@ export const ROUTE_IDS = {
   '/api/pokes/[id]': true,
   '/api/project-sessions': true,
   '/api/project-sessions/[id]/events': true,
+  '/api/proof': true,
   '/api/reports/[id]': true,
   '/api/rooms': true,
   '/api/services': true,
@@ -166,6 +173,7 @@ export const ROUTE_IDS = {
   '/api/setup/advanced': true,
   '/api/setup/claude': true,
   '/api/setup/notify': true,
+  '/api/setup/search': true,
   '/api/staff': true,
   '/api/staff/[id]': true,
   '/api/staff/[id]/access': true,
@@ -180,12 +188,14 @@ export const ROUTE_IDS = {
   '/api/staff/[id]/look': true,
   '/api/staff/[id]/pokes': true,
   '/api/staff/[id]/portrait': true,
+  '/api/staff/[id]/skills': true,
   '/api/staff/[id]/storage': true,
   '/api/staff/[id]/usage': true,
   '/api/staff/draft': true,
   '/api/switches': true,
   '/api/tasks/[id]': true,
   '/api/update': true,
+  '/api/weather': true,
   '/atlas/[file]': true,
   '/connect/callback': true
 } as const satisfies Record<RouteId, true>;

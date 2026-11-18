@@ -13,15 +13,18 @@ import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { answerProjectProbes } from './project-receiver.ts';
 const [box, nativeId, cwd] = process.argv.slice(2);
 const server = new McpServer({ name: 'oddboro_project', version: '1.0.0' });
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] });
+const isPaired = () =>
+  process.env.CLAUDE_CODE_SESSION_ID === nativeId &&
+  realpathSync(process.cwd()) === realpathSync(cwd);
+function paired() {
+  if (!isPaired()) throw new Error('This conversation is not paired with that office project.');
+}
 function offer() {
-  if (
-    process.env.CLAUDE_CODE_SESSION_ID !== nativeId ||
-    realpathSync(process.cwd()) !== realpathSync(cwd)
-  )
-    throw new Error('This conversation is not paired with that office project.');
+  paired();
   const row = JSON.parse(readFileSync(join(box, 'offer.json'), 'utf8')) as {
     id: string;
     prompt: string;
@@ -93,3 +96,9 @@ server.registerTool(
   }
 );
 await server.connect(new StdioServerTransport());
+// Another conversation in this project loads the plugin too. Its tools stay
+// up and refuse, and it never answers the office's readiness check.
+if (isPaired()) {
+  const receiver = answerProjectProbes(box, 'tools');
+  server.server.onclose = () => receiver.close();
+}

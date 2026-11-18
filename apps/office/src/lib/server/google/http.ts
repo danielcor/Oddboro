@@ -169,7 +169,7 @@ export function decodeEntities(text: string): string {
  * Replace until nothing more matches. One pass can leave a tag behind:
  * removing `<scr<script>ipt>` once makes a new `<script>`.
  */
-function untilStable(text: string, pattern: RegExp, by: string): string {
+export function untilStable(text: string, pattern: RegExp, by: string): string {
   let before: string;
   do {
     before = text;

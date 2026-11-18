@@ -23,7 +23,6 @@ const FIXED = realpathSync(mkdtempSync(join(tmpdir(), 'store-states-')));
 process.env.HOME = FIXED;
 process.env.ODDBORO_HOME = join(FIXED, '.oddboro');
 process.env.ODDBORO_CODE = join(FIXED, 'code', 'oddboro');
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 after(() => rmSync(FIXED, { recursive: true, force: true }));
 const O = await import('../src/office.ts');
 const C = await import('../src/capabilities.ts');

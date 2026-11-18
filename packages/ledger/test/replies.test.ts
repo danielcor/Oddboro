@@ -201,10 +201,10 @@ test('a second reply to the same email is refused naming the open one; revises r
   assert.equal(lines.length, 1, 'one ledger line');
   assert.equal(lines[0].title, `Sent: ${a.title}`);
   assert.match(lines[0].body, /^To Ada <ada@example\.com>\. Subject: Re: Lunch on Friday\?\./);
-  assert.equal(
-    (await sql`select 1 from follow_ups where ask_id = ${second}`).length,
-    0,
-    'no run carries a reply out'
+  assert.deepEqual(
+    [...(await sql`select kind from follow_ups where ask_id = ${second}`)],
+    [{ kind: 'answered' }],
+    'no run carries a reply out: the Odd, on no work, hears it was sent, once'
   );
   const late = await c.callTool({ name: 'propose_reply', arguments: email });
   assert.equal(late.isError, true, said(late));

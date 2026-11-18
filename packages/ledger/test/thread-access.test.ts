@@ -24,8 +24,6 @@ import { TEMP_IN_APPDATA } from './store-states.ts';
 const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'thread-access-')));
 process.env.HOME = HOME;
 after(() => rmSync(HOME, { recursive: true, force: true }));
-// The ledger rows a decision writes embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const { handOff, handOffBrief, handOffContext } = await import('../src/hand-offs.ts');
 const { decideAsk, raiseAsk } = await import('../src/office.ts');
 const { HAND_OFF_LIMIT } = await import('../src/threads.ts');

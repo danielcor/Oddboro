@@ -31,40 +31,46 @@ test('project tools exist only while advanced mode is on', async () => {
   await shareProject(s.id, null);
 });
 
-test('only a shared project offers its tools, and a Draft run keeps one proposal', async () => {
-  await setAdvancedMode(true);
-  const before = await toolServer('editor', {});
-  assert.ok(!(await offers(before)));
-  const s = await connectProject('codex', randomUUID(), '/fixture/project', 'A project');
-  await shareProject(s.id, 'editor');
-  const client = await toolServer('editor', { CEILING: 'draft' });
-  const call = (key: string) =>
-    client.callTool({
-      name: 'send_project_work',
-      arguments: { session: s.id, key, prompt: 'Review the draft.' }
-    });
-  const key = randomUUID();
-  assert.ok(!(await call(key)).isError);
-  assert.ok(!(await call(key)).isError);
-  const work = await projectWork(s.id);
-  assert.equal(work.length, 1);
-  assert.equal(work[0].state, 'proposed');
-  const read = await toolServer('editor', { CEILING: 'read' });
-  assert.equal(
-    (
-      await read.callTool({
+test(
+  'only a shared project offers its tools, and a Draft run keeps one proposal',
+  // Four tool servers, one for each run it checks: four starts in a row hit
+  // the package's 15 s limit on a loaded machine, so each gets that limit.
+  { timeout: 60_000 },
+  async () => {
+    await setAdvancedMode(true);
+    const before = await toolServer('editor', {});
+    assert.ok(!(await offers(before)));
+    const s = await connectProject('codex', randomUUID(), '/fixture/project', 'A project');
+    await shareProject(s.id, 'editor');
+    const client = await toolServer('editor', { CEILING: 'draft' });
+    const call = (key: string) =>
+      client.callTool({
         name: 'send_project_work',
-        arguments: { session: s.id, key: randomUUID(), prompt: 'Review.' }
-      })
-    ).isError,
-    true
-  );
-  const lesson = await toolServer('editor', { LESSON_RUN: '1' });
-  assert.ok(!(await offers(lesson)));
-  await shareProject(s.id, null);
-  assert.equal((await call(randomUUID())).isError, true);
-  assert.equal((await projectWork(s.id)).length, 1);
-});
+        arguments: { session: s.id, key, prompt: 'Review the draft.' }
+      });
+    const key = randomUUID();
+    assert.ok(!(await call(key)).isError);
+    assert.ok(!(await call(key)).isError);
+    const work = await projectWork(s.id);
+    assert.equal(work.length, 1);
+    assert.equal(work[0].state, 'proposed');
+    const read = await toolServer('editor', { CEILING: 'read' });
+    assert.equal(
+      (
+        await read.callTool({
+          name: 'send_project_work',
+          arguments: { session: s.id, key: randomUUID(), prompt: 'Review.' }
+        })
+      ).isError,
+      true
+    );
+    const lesson = await toolServer('editor', { LESSON_RUN: '1' });
+    assert.ok(!(await offers(lesson)));
+    await shareProject(s.id, null);
+    assert.equal((await call(randomUUID())).isError, true);
+    assert.equal((await projectWork(s.id)).length, 1);
+  }
+);
 
 test('a run at Act waits for the owner until the session lets that Odd send without asking', async () => {
   const s = await connectProject('codex', randomUUID(), '/fixture/act', 'Act');

@@ -8,10 +8,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   FOLLOW_UP_KINDS,
+  type AskKind,
   type AskRow,
   type FollowUpRow,
   type GoalRow,
-  type ReportRow,
   type TaskRow
 } from '@oddboro/ledger';
 import { GRANTABLE_TOOLS, isOffered, OFFICE_TOOLS, type ToolRun } from '@oddboro/ledger/tools';
@@ -33,7 +33,7 @@ const NAMES_UNHELD: Record<string, readonly string[]> = {
     'list_goals',
     'propose_goal_plan'
   ], // NEW-1716
-  'first_day brief': ['give_owner_a_task', 'ask_for_access'], // NEW-1716
+  'first_day brief': ['ask_for_access'], // NEW-1716
   'goal brief': [
     'give_owner_a_task',
     'find_connectors',
@@ -52,8 +52,7 @@ const NAMES_UNHELD: Record<string, readonly string[]> = {
     'propose_reply',
     'propose_filter'
   ], // NEW-1716
-  // These four share the feedback brief (`followUpBrief`).
-  'feedback brief': ['give_owner_a_task'], // NEW-1716
+  // These three share the feedback brief (`followUpBrief`).
   'hand_off brief': ['give_owner_a_task'], // NEW-1716
   'handed_back brief': ['give_owner_a_task'], // NEW-1716
   'edited brief': ['give_owner_a_task'] // NEW-1716
@@ -61,28 +60,75 @@ const NAMES_UNHELD: Record<string, readonly string[]> = {
 
 // Only the fields a brief reads are filled in; the rest of each row stays out.
 const asked = { id: 7, title: 'Send it', why: 'Because', ifApproved: 'It goes' };
-/** Every ask a brief words apart: by its kind, its answer, whether it got access or plans a hire, and what the owner gave or the office called. */
-const ASKS = [
-  { ...asked, kind: 'approval', status: 'approved' },
-  { ...asked, kind: 'access', status: 'approved', access: {} },
-  { ...asked, kind: 'hire', status: 'approved' },
-  { ...asked, kind: 'plan', status: 'approved', plan: { items: [{ kind: 'hire' }] } },
-  { ...asked, kind: 'plan', status: 'denied', plan: { items: [] } },
-  {
-    ...asked,
-    kind: 'folder',
-    status: 'approved',
-    folder: { path: '/work/taxes', level: 'write', given: { path: '/work/taxes', level: 'read' } }
-  },
-  { ...asked, kind: 'switch', status: 'approved', switches: ['commands', 'web'] },
-  {
-    ...asked,
-    kind: 'call',
-    status: 'approved',
-    call: { connector: 'mail', tool: 'send_message', arguments: { to: 'a' } }
-  }
-] as unknown as AskRow[];
-const report = { id: 3, title: 'Weekly', body: 'All well' } as ReportRow;
+/**
+ * Every ask a brief words apart, by kind: its answer, whether it got access
+ * or plans a hire, what it carries, and what the owner gave or the office
+ * called. A kind with no rows is worded as an approval is. A new kind fails
+ * the type check here until it says which.
+ */
+const ASK_ROWS: Record<AskKind, object[]> = {
+  approval: [{ ...asked, kind: 'approval', status: 'approved' }],
+  access: [{ ...asked, kind: 'access', status: 'approved', access: {} }],
+  hire: [{ ...asked, kind: 'hire', status: 'approved' }],
+  plan: [
+    { ...asked, kind: 'plan', status: 'approved', plan: { items: [{ kind: 'hire' }] } },
+    { ...asked, kind: 'plan', status: 'denied', plan: { items: [] } }
+  ],
+  folder: [
+    {
+      ...asked,
+      kind: 'folder',
+      status: 'approved',
+      folder: { path: '/work/taxes', level: 'write', given: { path: '/work/taxes', level: 'read' } }
+    }
+  ],
+  switch: [{ ...asked, kind: 'switch', status: 'approved', switches: ['commands', 'web'] }],
+  level: [{ ...asked, kind: 'level', status: 'approved', level: 'act' }],
+  office_tool: [
+    {
+      ...asked,
+      kind: 'office_tool',
+      status: 'approved',
+      officeTools: ['office_report', 'list_goals']
+    }
+  ],
+  call: [
+    {
+      ...asked,
+      kind: 'call',
+      status: 'approved',
+      call: { connector: 'mail', tool: 'send_message', arguments: { to: 'a' } }
+    }
+  ],
+  reply: [
+    {
+      ...asked,
+      kind: 'reply',
+      status: 'approved',
+      reply: { to: ['ada@example.com'], cc: [], subject: 'Lunch', body: 'Yes', summary: 'A lunch' }
+    }
+  ],
+  filter: [
+    {
+      ...asked,
+      kind: 'filter',
+      status: 'approved',
+      filter: {
+        criteria: { from: 'news@example.com' },
+        action: { skipInbox: true },
+        summary: 'News'
+      }
+    }
+  ],
+  goal: [],
+  hand_offs: [],
+  window: [],
+  remove: [],
+  bring_back: [],
+  catch_up: [],
+  standing: []
+};
+const ASKS = Object.values(ASK_ROWS).flat() as unknown as AskRow[];
 const task = {
   row: { id: 4, title: 'Sign in', why: 'Needed', steps: [] } as unknown as TaskRow,
   files: []
@@ -101,7 +147,15 @@ const texts = (has: (tool: string) => boolean, run: ToolRun): Record<string, str
   // Odd without it is never told to call it. That a run whose Odd holds it but is
   // not offered it (`handsOff`) is not told either is staff-run.test.ts's.
   "who's here": whoIsHereSection(
-    [{ id: 'nate', name: 'Nate', role: 'Researcher', persona: true }],
+    [
+      {
+        id: 'nate',
+        name: 'Nate',
+        role: 'Researcher',
+        remit: 'Researches a question.',
+        persona: true
+      }
+    ],
     has('hand_off')
   ),
   ...(!run.chat &&
@@ -110,7 +164,7 @@ const texts = (has: (tool: string) => boolean, run: ToolRun): Record<string, str
         `${kind} brief`,
         [
           ...ASKS.flatMap((a) =>
-            followUpBrief({ kind, note: 'Their words' } as FollowUpRow, a, report, task, goal)
+            followUpBrief({ kind, note: 'Their words' } as FollowUpRow, a, task, goal)
           ),
           ...followUpBrief({ kind, note: null } as FollowUpRow)
         ].join('\n')

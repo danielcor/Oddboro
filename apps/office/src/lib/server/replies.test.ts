@@ -175,8 +175,11 @@ test('Send sends it in the thread as a reply to the message, then approves the a
   );
   // Nothing was changed, so there is nothing to learn from.
   assert.equal((await edits(id)).length, 0);
-  // No run carries a reply out: the office already did.
-  assert.equal((await L.pg`select 1 from follow_ups where ask_id = ${id}`).length, 0);
+  // No run carries a reply out: the office already did. On no work, the Odd hears so, once.
+  assert.deepEqual(
+    [...(await L.pg`select kind from follow_ups where ask_id = ${id}`)],
+    [{ kind: 'answered' }]
+  );
 });
 
 test("the Odd's files go with it, less any the owner took off, through Gmail's upload address; the owner cannot add one", async () => {

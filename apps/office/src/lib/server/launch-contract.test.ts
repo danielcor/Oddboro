@@ -17,7 +17,7 @@ import {
   type Gave
 } from './office-under-test.ts';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Agent } from '@oddboro/ledger';
@@ -316,5 +316,30 @@ test("a secret store, or the office's accounts folder, stored as a folder never 
           given.push(`${agent} on ${platform}: ${r}`);
     }, stored);
     assert.deepEqual(given, [], 'a run was given a secret store');
+    assert.ok(launches > 0, 'no tool runs anywhere: nothing was checked');
+  }));
+
+test("a Linux browser's or keyring's folder stored as a folder never reaches any run, nor does the ~/.local that holds the keyrings", () =>
+  ownerHome(async (home) => {
+    const keyrings = join(home, '.local', 'share', 'keyrings');
+    mkdirSync(keyrings, { recursive: true });
+    writeFileSync(join(keyrings, 'login.keyring'), '');
+    const browsers = [
+      join(home, 'snap', 'firefox'),
+      join(home, '.var', 'app', 'org.mozilla.firefox')
+    ];
+    for (const b of browsers) mkdirSync(b, { recursive: true });
+    const real = (p: string) => (existsSync(p) ? realpathSync.native(p) : p);
+    const stores = [keyrings, ...browsers].map(real);
+    // Stored straight to the table, as folders given before their stores were
+    // listed: each store, and ~/.local, which holds the keyrings.
+    const stored = [...stores, real(join(home, '.local'))];
+    const given: string[] = [];
+    const launches = await eachLaunch((gave, agent, platform) => {
+      for (const r of new Set(WALLS[agent](gave).reads.map(real)))
+        if (stores.some((s) => L.within(r, s) || L.within(s, r)))
+          given.push(`${agent} on ${platform}: ${r}`);
+    }, stored);
+    assert.deepEqual(given, [], 'a run was given a Linux secret store');
     assert.ok(launches > 0, 'no tool runs anywhere: nothing was checked');
   }));

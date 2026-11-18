@@ -7,7 +7,7 @@
 // the floor and the usage records, and that what its shell left running in the
 // run's process tree stops with it. Run with `npm test -w @oddboro/office`.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -45,6 +45,7 @@ import {
 
 const { mcpServers, GATEWAY_TOKEN } = await import('./codex.ts');
 const { stopGroups } = await import('./launch.ts');
+const { processGone } = await import('./drive.ts');
 const { deniedEdits } = await import('./files.ts');
 
 await L.pg`insert into staff ${L.pg([
@@ -733,14 +734,8 @@ test('whatever a Codex run with Run commands left running stops when the run end
     await L.pg`update staff set commands = false where id = 'cole'`;
   }
   const pid = Number(readFileSync(at, 'utf8'));
-  const alive = () => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  // A signal still finds a process that exited and waits to be reaped, so it asks ps too.
+  const alive = () => !processGone(pid);
   try {
     for (let i = 0; i < 100 && alive(); i++) await new Promise((r) => setTimeout(r, 20));
     assert.equal(alive(), false, 'the sleep the run started outlived it');
@@ -763,16 +758,14 @@ setInterval(() => {}, 1000);`
     ],
     { detached: true, stdio: 'ignore' }
   );
-  const alive = (pid: number) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  // What ps says of a process, for a failure's message.
+  const state = (pid: number) =>
+    spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+  const alive = (pid: number) => !processGone(pid);
+  /** Until `done`, within 10 s on a busy runner; done ends the wait at once. */
   const wait = async (done: () => boolean) => {
-    for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+    const until = Date.now() + 10_000;
+    while (!done() && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
   };
   await wait(() => existsSync(at));
   const command = Number(readFileSync(at, 'utf8'));
@@ -780,8 +773,8 @@ setInterval(() => {}, 1000);`
     assert.ok(tool.pid && alive(command), 'the stand-in did not start its command');
     stopGroups(tool.pid);
     await wait(() => !alive(command) && !alive(tool.pid!));
-    assert.equal(alive(command), false, 'the command outlived the run');
-    assert.equal(alive(tool.pid), false, 'the tool outlived the run');
+    assert.equal(alive(command), false, `the command outlived the run (ps: ${state(command)})`);
+    assert.equal(alive(tool.pid), false, `the tool outlived the run (ps: ${state(tool.pid)})`);
   } finally {
     for (const pid of [command, tool.pid]) if (pid && alive(pid)) process.kill(pid);
   }

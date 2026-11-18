@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import { and, eq, sql } from 'drizzle-orm';
 import { asks, followUps, staff, threads } from '../src/schema.ts';
 import { workName } from '../src/work-paths.ts';
@@ -14,8 +14,23 @@ import type { ThreadFor } from '../src/threads.ts';
 import { db } from './pglite.ts';
 import { ownerWords } from './owner-words.ts';
 
-// The ledger rows a decision writes embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
+// Every ledger line goes through `record` below, before any module that writes
+// one loads: a test sets `onLine` to act while a decision's line is written.
+let onLine: ((askId: number | undefined) => Promise<void>) | undefined;
+const ledgerUrl = new URL('../src/office-ledger.ts', import.meta.url).href;
+mock.module(ledgerUrl, {
+  exports: {
+    record: async (...a: Parameters<typeof real.record>) => {
+      await onLine?.(a[0].askId);
+      return real.record(...a);
+    },
+    searchLedger: (...a: Parameters<typeof real.searchLedger>) => real.searchLedger(...a),
+    precedent: (...a: Parameters<typeof real.precedent>) => real.precedent(...a),
+    reindexLedger: () => real.reindexLedger()
+  }
+});
+// The query loads the real module apart from the mock, whose type is the module's own.
+const real = (await import(`${ledgerUrl}?real`)) as typeof import('../src/office-ledger.ts');
 // Loaded once db.ts is this database, so every query they make lands here.
 const { handOff } = await import('../src/hand-offs.ts');
 const { decideAsk } = await import('../src/office.ts');
@@ -232,6 +247,29 @@ test('a no stops the work, starts nothing, refuses the next hand-off, and tells 
   assert.equal((await ofKind(id, 'hand_off')).length, 0, 'the held hand-off went on a no');
   const r = await give({ id });
   assert.ok('problem' in r && r.problem.includes('has ended (stopped)'), JSON.stringify(r));
+});
+
+test("a hand-off that lands between the owner's no to more hand-offs and the work's stop is refused, and raises no new ask", async () => {
+  const { id, ask } = await askedToGoOn();
+  let landed: ReturnType<typeof give> | undefined;
+  onLine = async (askId) => {
+    if (askId !== ask || landed) return;
+    // The lead hands off again as the no's line is written, and gets a quarter
+    // second to land: where the stop is a step after the no, it lands before
+    // the stop; where the stop commits with the no, it waits for both.
+    landed = give({ id });
+    await Promise.race([landed, new Promise((done) => setTimeout(done, 250))]);
+  };
+  try {
+    await decideAsk(ask, 'deny', null);
+  } finally {
+    onLine = undefined;
+  }
+  assert.ok(landed, "the no's line was never written");
+  const r = await landed;
+  assert.ok('problem' in r && r.problem.includes('has ended (stopped)'), JSON.stringify(r));
+  assert.equal((await ofKind(id, 'hand_off')).length, 0, 'a hand-off went on stopped work');
+  assert.equal((await openAsks(id)).length, 0, 'stopped work asks to go on');
 });
 
 test('the ask takes a yes or a no only, never a send-back', async () => {

@@ -102,12 +102,22 @@ function toCandidate(s: RegistryServer): Candidate {
   };
 }
 
+/** A work description such as "Notion pages" need not appear in the registry's server name. */
+const hostedProviders = [
+  { product: /\bnotion\b/i, registry: 'com.notion/mcp' },
+  { product: /\blinear\b/i, registry: 'app.linear/linear' }
+];
+
 export async function searchRegistry(query: string, limit = 8): Promise<Candidate[]> {
-  const url = `${REGISTRY}?version=latest&limit=${limit}&search=${encodeURIComponent(query)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error(`The MCP Registry answered ${res.status}`);
-  const body = (await res.json()) as { servers: { server: RegistryServer }[] };
-  return body.servers.map((s) => toCandidate(s.server));
+  const provider = /\s/.test(query) && hostedProviders.find((p) => p.product.test(query));
+  for (const search of provider ? [query, provider.registry] : [query]) {
+    const url = `${REGISTRY}?version=latest&limit=${limit}&search=${encodeURIComponent(search)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error(`The MCP Registry answered ${res.status}`);
+    const body = (await res.json()) as { servers: { server: RegistryServer }[] };
+    if (body.servers.length) return body.servers.map((s) => toCandidate(s.server));
+  }
+  return [];
 }
 
 /** One registry server by its exact name. */
@@ -195,6 +205,13 @@ export type WayIn = { keyHeader?: string };
 const byAddress = (url: string, way: WayIn): ConnectorConfig =>
   way.keyHeader ? { url, headers: [way.keyHeader], oauth: false } : { url, oauth: true };
 
+/** The catalog id `ensureConnector` finds or gives `wanted`: an id as it is, or a hosted server's by its https address. */
+export function connectorIdFor(wanted: string): string {
+  const url = /^https:\/\/\S+$/.test(wanted) ? new URL(wanted) : undefined;
+  if (!url) return wanted;
+  return url.href === POSTAL_URL ? POSTAL_ID : connectorId(`${url.hostname}${url.pathname}`);
+}
+
 /**
  * A catalog connector by id, or a registry server added to the catalog by its
  * name, or a hosted server by its https address. `way` says how a server named
@@ -209,14 +226,8 @@ export async function ensureConnector(
     return {
       problem: `"${way.keyHeader}" is not a header name. Use letters, digits and dashes, like x-api-key.`
     };
-  const isUrl = /^https:\/\/\S+$/.test(wanted);
-  const url = isUrl ? new URL(wanted) : undefined;
-  const id =
-    url?.href === POSTAL_URL
-      ? POSTAL_ID
-      : url
-        ? connectorId(`${url.hostname}${url.pathname}`)
-        : wanted;
+  const url = /^https:\/\/\S+$/.test(wanted) ? new URL(wanted) : undefined;
+  const id = connectorIdFor(wanted);
   const own = await connector(id);
   if (own) {
     // One named by its address and not connected yet takes the way in asked for now.
@@ -228,6 +239,10 @@ export async function ensureConnector(
       }
     }
     return { connector: own };
+  }
+  if (!url && wanted.includes('/')) {
+    const saved = await connector(connectorId(wanted));
+    if (saved?.registry === wanted) return { connector: saved };
   }
   const built = BUILT_IN.find((b) => b.id === id);
   if (built) return { connector: await addConnector(built) };

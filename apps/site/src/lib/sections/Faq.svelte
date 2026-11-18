@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Eleven questions as native disclosures. Each answer fades in once when
+  // Common questions as native disclosures. Each answer fades in once when
   // opened; the chevron turns. Code in an answer is marked in the text with
   // backticks and rendered as <code>.
   import SectionHeader from '#lib/components/SectionHeader.svelte';
@@ -25,6 +25,10 @@
     {
       q: 'Does it run on Windows or Linux?',
       a: 'Yes, both. Windows: an installer for Windows 10 and 11, on x64 and arm64. Linux: an AppImage for x86_64 and arm64, on a desktop with systemd, a keyring and notifications.'
+    },
+    {
+      q: 'Will my Odds keep working when my laptop sleeps?',
+      a: 'No. Odds work only while the computer running Oddboro is awake. When it wakes, missed jobs catch up or show on your Desk as skipped. To run jobs overnight, install Oddboro on a computer you can leave awake and keep the app running there. Its Odds need their own accounts and files there, and you check on them on that computer. The job schedule and work history stay on that computer.'
     },
     {
       q: 'What leaves my computer?',

@@ -9,8 +9,10 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync
 } from 'node:fs';
@@ -28,9 +30,7 @@ export function backUpForNewVersion(version = process.env.ODDBORO_VERSION): stri
   if (last === version) return undefined;
   let made: string | undefined;
   if (existsSync(home('db'))) {
-    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
-    made = home('backups', `pre-${version}-${stamp}`);
-    cpSync(home('db'), join(made, 'db'), { recursive: true });
+    made = copyAside(`pre-${version}-${stampNow()}`, ['db']);
     prune();
   }
   // A first start on a new Mac has no office folder yet.
@@ -41,6 +41,37 @@ export function backUpForNewVersion(version = process.env.ODDBORO_VERSION): stri
   console.log(
     `office: first start of ${version}${last ? ` after ${last}` : ''}${made ? `, backed up to ${made}` : ''}`
   );
+  return made;
+}
+
+/** The time now as a folder name takes it: `20261114T230102Z`. */
+export const stampNow = (): string =>
+  new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+
+/**
+ * Copy `parts` of the office home (those that exist) into `<home>/backups/<name>`,
+ * whole or not at all: into a `.copying-` folder first, renamed once every
+ * part is in. Returns the copy's folder. Restoring a backup uses it too
+ * (office-backup.ts).
+ */
+export function copyAside(name: string, parts: string[]): string {
+  const dir = home('backups');
+  const made = join(dir, name);
+  mkdirSync(dir, { recursive: true });
+  // A copy a force-quit or crash cut off is never a backup, and only one
+  // office opens this home at a time, so clear any before copying again.
+  for (const n of readdirSync(dir))
+    if (n.startsWith('.copying-')) rmSync(join(dir, n), { recursive: true, force: true });
+  const copying = mkdtempSync(join(dir, '.copying-'));
+  try {
+    for (const part of parts)
+      if (existsSync(home(part)))
+        cpSync(home(part), join(copying, part), { recursive: true, verbatimSymlinks: true });
+    renameSync(copying, made);
+  } catch (error) {
+    rmSync(copying, { recursive: true, force: true });
+    throw error;
+  }
   return made;
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { clockTime } from '@oddboro/ledger/time';
   import { call, type ApiUrl } from './api.ts';
+  let { showWindow = true }: { showWindow?: boolean } = $props();
 
   // The Setup window's Updates section: the version this is, Check now, the
   // window updates install in, and a ready update with Install now and
@@ -90,8 +91,8 @@
   {:else}
     <p class="text-xs text-muted">
       {update.current === 'development'
-        ? 'This is a development build. Only the Mac app updates itself.'
-        : `This is Oddboro ${update.current}. Every update installs, in the window below.`}
+        ? 'This is a development build. Only the Oddboro app updates itself.'
+        : `This is Oddboro ${update.current}. Every update installs in your chosen window.`}
     </p>
     {#if update.ready}
       <div class="flex flex-col gap-2 rounded-lg bg-sea/15 px-3 py-2 text-xs">
@@ -118,25 +119,27 @@
     {:else if lastCheck}
       <p class="text-xs text-faint">{lastCheck}</p>
     {/if}
-    <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
-      <span>Installs between</span>
-      <input
-        class={field}
-        type="time"
-        aria-label="Window start"
-        bind:value={start}
-        onchange={saveWindow}
-      />
-      <span>and</span>
-      <input
-        class={field}
-        type="time"
-        aria-label="Window end"
-        bind:value={end}
-        onchange={saveWindow}
-      />
-      <span>office time.</span>
-    </div>
+    {#if showWindow}
+      <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
+        <span>Installs between</span>
+        <input
+          class={field}
+          type="time"
+          aria-label="Window start"
+          bind:value={start}
+          onchange={saveWindow}
+        />
+        <span>and</span>
+        <input
+          class={field}
+          type="time"
+          aria-label="Window end"
+          bind:value={end}
+          onchange={saveWindow}
+        />
+        <span>office time.</span>
+      </div>
+    {/if}
   {/if}
   {#if problem}
     <p class="rounded-lg bg-coral/15 px-3 py-2 text-xs text-coral">{problem}</p>

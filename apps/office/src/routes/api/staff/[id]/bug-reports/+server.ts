@@ -1,7 +1,7 @@
 // Only the owner's page can POST. The destination is fixed, and the reviewed
 // text travels on stdin so it never appears in the process list.
-import { execFile } from 'node:child_process';
 import { error, json } from '@sveltejs/kit';
+import { probe } from '@oddboro/ledger/platform';
 import { BODY_LIMIT, BUG_REPO, ISSUES, TITLE_LIMIT } from '#lib/bug-report.ts';
 import { cleanEnv } from '#lib/server/claude.ts';
 import { onPath } from '#lib/server/on-path.ts';
@@ -24,28 +24,41 @@ export const POST: RequestHandler = async ({ request, params }) => {
   const env = cleanEnv();
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
-  const number = await new Promise<number>((resolve) => {
-    const child = execFile(
-      gh,
-      [
-        'api',
-        '--hostname',
-        'github.com',
-        '--method',
-        'POST',
-        `repos/${BUG_REPO}/issues`,
-        '--input',
-        '-',
-        '--jq',
-        '.number'
-      ],
-      { env: { ...env, GH_PROMPT_DISABLED: '1' }, windowsHide: true, timeout: 30_000 },
-      (err, out) => resolve(!err && /^[1-9]\d*$/.test(out.trim()) ? Number(out.trim()) : 0)
-    );
-    // The CLI can exit before reading, for example when it has no sign-in.
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(JSON.stringify({ title, body }));
-  });
+  const r = await probe(
+    gh,
+    [
+      'api',
+      '--hostname',
+      'github.com',
+      '--method',
+      'POST',
+      `repos/${BUG_REPO}/issues`,
+      '--input',
+      '-',
+      '--jq',
+      '.number'
+    ],
+    {
+      env: { ...env, GH_PROMPT_DISABLED: '1' },
+      timeout: 30_000,
+      input: JSON.stringify({ title, body })
+    }
+  );
+  let number = 0;
+  switch (r.status) {
+    case 'ok':
+      if (/^[1-9]\d*$/.test(r.out.trim())) number = Number(r.out.trim());
+      break;
+    // GitHub confirmed nothing, so the owner checks the issue list before filing again.
+    case 'failed':
+    case 'missing':
+    case 'timeout':
+      break;
+    default: {
+      const missed: never = r;
+      throw new Error(`gh came back as ${JSON.stringify(missed)}`);
+    }
+  }
   if (!Number.isSafeInteger(number) || number < 1)
     error(
       502,

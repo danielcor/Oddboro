@@ -1,0 +1,1 @@
+ALTER TABLE "staff" ADD COLUMN "acts_on_hand_offs" boolean DEFAULT false NOT NULL;

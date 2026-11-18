@@ -25,7 +25,7 @@ async function thread(hub: string, ...colleagues: string[]): Promise<number> {
   const [{ id }] = await L.pg<{ id: number }[]>`
     insert into threads (title, hub_id, holder_id) values ('A piece of work', ${hub}, ${hub}) returning id`;
   for (const c of colleagues)
-    await L.pg`insert into follow_ups (staff_id, kind, thread_id, outcome) values (${c}, 'hand_off', ${id}, 'done')`;
+    await L.pg`insert into follow_ups (staff_id, kind, thread_id, outcome, done_at) values (${c}, 'hand_off', ${id}, 'done', now())`;
   return id;
 }
 const put = (id: number, staff: string, path: string, text: string): string => {

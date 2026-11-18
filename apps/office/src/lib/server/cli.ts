@@ -1,8 +1,6 @@
-// What a staffer's run does by the coding tool it runs on, apart from Claude
-// Code's own arguments, which run() in staff.ts builds: how a run on Grok,
-// Codex or Gemini starts (grok.ts, codex.ts, gemini.ts), the tools a line of
-// Claude Code's stream names (Grok streams in that shape), and why a run
-// ended early. Server only.
+// What a run does by the coding tool it runs on: how a run on Claude Code,
+// Grok, Codex or Gemini starts (claude.ts, grok.ts, codex.ts, gemini.ts), and
+// why a run ended early. Server only.
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
@@ -13,17 +11,22 @@ import {
   type Effort
 } from '@oddboro/ledger';
 import { deniedEdits } from './files.ts';
-import { configServers, type McpServer, type RunEvent, type RunImage } from './launch.ts';
+import { claudeLaunch, type ClaudeRun } from './claude.ts';
+import {
+  configServers,
+  type McpServer,
+  type ResultFacts,
+  type RunEvent,
+  type RunImage
+} from './launch.ts';
 import { GROK_PLAN_LIMIT, GROK_SIGN_IN, grokLaunch, grokSignedOut } from './grok.ts';
 import { codexLaunch, codexReader, codexSignedOut } from './codex.ts';
 import { geminiKeyMissing, geminiLaunch, geminiReader } from './gemini.ts';
-import { GROK_FILE_TOOLS } from '../staff/work.ts';
 
 /**
  * How one run starts: the tool's arguments, environment and input, and what
  * to remove once it ends. `read` turns a line of a tool's own stream into
- * what the run takes from it; without one, the line is in Claude Code's
- * stream shape, which Grok's follows. `ownGroup`: the tool has a shell, whose
+ * what the run takes from it (`drive` in drive.ts). `ownGroup`: the tool has a shell, whose
  * commands may outlive it, so the run is a process group of its own, and that
  * group and the group of every process under it stop when the run ends or
  * times out (`stopGroups`).
@@ -33,11 +36,13 @@ export type Launch = {
   env: NodeJS.ProcessEnv;
   stdin: string;
   done: () => void;
-  read?: (e: Record<string, unknown>) => RunEvent[];
+  read: (e: Record<string, unknown>) => RunEvent[];
+  /** How words added to a run while it replies are written to its input, for a tool that takes them. */
+  turn?: (text: string) => string;
   ownGroup?: true;
 };
 
-/** What a run on Grok, Codex or Gemini needs from run(). */
+/** What a run needs, whatever its tool: an Odd's from run() in staff.ts, the office's own from runAsOffice. */
 export type CliRun = {
   /** The run's key (`runsGoing`). */
   key: string;
@@ -83,17 +88,16 @@ export type CliRun = {
 };
 
 /**
- * Each tool but Claude Code, whose arguments run() builds from its own
- * rules. Every one has an entry, so a new tool fails the type check until it
- * is handled. A tool that cannot start says why instead (`refused`), and so
+ * How a run starts on each tool. Every one has an entry, so a new tool fails
+ * the type check until it is handled. Each takes a `ClaudeRun`, whose added
+ * fields only Claude Code reads, so one call serves every tool. A tool that
+ * cannot start says why instead (`refused`), and so
  * does one handed a run its tool cannot hold, Grok or Gemini with commands
  * and Codex without, first, so a change to `commandsHow` alone fails the run
  * rather than silently dropping or adding the shell.
  */
-export const LAUNCHES: Record<
-  Exclude<Agent, 'claude'>,
-  (r: CliRun) => Promise<Launch | { refused: string }>
-> = {
+export const LAUNCHES: Record<Agent, (r: ClaudeRun) => Promise<Launch | { refused: string }>> = {
+  claude: async (r) => claudeLaunch(r),
   grok: async (r) => {
     if (r.commands) return { refused: COMMANDS_WHY.grok };
     const signedOut = await grokSignedOut(r.timeoutMs, r.account);
@@ -184,45 +188,6 @@ export const LAUNCHES: Record<
 };
 
 /**
- * Claude Code's name for a tool Grok names: a file tool by GROK_FILE_TOOLS,
- * and search_tool, which finds an MCP tool before Grok calls it, ToolSearch.
- */
-function grokTool(name: string): string {
-  if (Object.hasOwn(GROK_FILE_TOOLS, name))
-    return GROK_FILE_TOOLS[name as keyof typeof GROK_FILE_TOOLS];
-  return name === 'search_tool' ? 'ToolSearch' : name;
-}
-
-/**
- * The tools one line of Claude Code's stream names, by Claude Code's names,
- * as the floor is told them. Grok streams in the same shape with its own
- * names (`grokTool`), and calls every MCP tool through use_tool, which names
- * it as server__tool: that call shows once, from the whole message, the way
- * Claude Code names one, mcp__server__tool.
- */
-export function streamTools(agent: Agent, e: Record<string, unknown>): string[] {
-  if (e.type === 'stream_event') {
-    const ev = e.event as { type: string; content_block?: { type: string; name?: string } };
-    if (
-      ev.type !== 'content_block_start' ||
-      ev.content_block?.type !== 'tool_use' ||
-      ev.content_block.name === 'use_tool'
-    )
-      return [];
-    const name = ev.content_block.name ?? 'a tool';
-    return [agent === 'grok' ? grokTool(name) : name];
-  }
-  if (e.type !== 'assistant') return [];
-  const blocks = (e.message as { content?: unknown } | undefined)?.content;
-  return (Array.isArray(blocks) ? blocks : []).flatMap((b: unknown) => {
-    const block = b as { name?: unknown; input?: { tool_name?: unknown } };
-    return block.name === 'use_tool' && typeof block.input?.tool_name === 'string'
-      ? [`mcp__${block.input.tool_name}`]
-      : [];
-  });
-}
-
-/**
  * Grok's words when its plan has no usage left: the line its stream ends a
  * run with, and the error code under it (`subscription:free-usage-exhausted`
  * in its log's turn.terminal_failure), both from the walk on 2026-11-04.
@@ -279,11 +244,9 @@ export function stoppedWhy(
  * to the office's own sign-in, on the page (`GROK_SIGN_IN`). Its plan limit carries
  * an upsell link, so that one is the office's own words (`GROK_PLAN_LIMIT`).
  */
-export function endedEarly(agent: Agent, e: Record<string, unknown>): string {
-  const said = (Array.isArray(e.errors) ? e.errors : [])
-    .filter((x): x is string => typeof x === 'string')
-    .join(' ');
+export function endedEarly(agent: Agent, r: ResultFacts): string {
+  const said = r.errors.join(' ');
   if (agent === 'grok' && /^Not signed in\b/.test(said)) return GROK_SIGN_IN;
   if (agent === 'grok' && GROK_PLAN_SPENT.test(said)) return GROK_PLAN_LIMIT;
-  return `The session ended early (${String(e.subtype)})${said ? `: ${said}` : '.'}`;
+  return `The session ended early (${r.subtype})${said ? `: ${said}` : '.'}`;
 }

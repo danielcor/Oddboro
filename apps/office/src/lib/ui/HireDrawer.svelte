@@ -21,6 +21,8 @@
   import { AgentTools } from './agent-tools.svelte.ts';
   import AccountSignIn from './AccountSignIn.svelte';
   import { account } from './account.svelte.ts';
+  import PersonaBrief from './PersonaBrief.svelte';
+  import AgentFileServers from './AgentFileServers.svelte';
   import PersonaOffer from './PersonaOffer.svelte';
   import { connect, PersonaOffers, personas as asked } from './persona-offers.svelte.ts';
   import {
@@ -31,8 +33,10 @@
     type Offer
   } from '#lib/persona.ts';
   import { call } from './api.ts';
+  import { withActCheck } from './act-check.svelte.ts';
   import { wins } from './windows.svelte.ts';
   import type { StaffProfile } from '../staff/roster.ts';
+  import type { ImportedServer, SortedServers } from '../staff/claude-agent.ts';
 
   type Props = {
     /** Rooms on the floor a staffer can work in: template id and name. */
@@ -173,6 +177,59 @@
   let tools = $state<string[] | undefined>();
   let busy = $state(false);
   let problem = $state('');
+  /**
+   * What an imported Claude Code agent file brought: the settings it left in
+   * the file, in plain words, and its MCP servers, sorted into the ones that
+   * become access asks once hired and the ones only listed (`sortServers`).
+   */
+  let imported = $state<{ skipped: string; servers: ImportedServer[]; sorted: SortedServers }>();
+  /** The hidden file box the Import button opens. */
+  let picker = $state<HTMLInputElement>();
+
+  async function importAgent(file: File) {
+    busy = true;
+    problem = '';
+    try {
+      const { readClaudeAgentFile, skippedSaid, sortServers } =
+        await import('../staff/claude-agent.ts');
+      const draft = await readClaudeAgentFile(file);
+      // A server named only by a name asks when the office's tools have it.
+      const known = draft.servers.some((s) => s.url === undefined && s.command === undefined)
+        ? (await call<{ known: { id: string; name: string }[] }>('/api/connectors')).known
+        : [];
+      name = draft.name;
+      role = draft.role;
+      remit = draft.remit;
+      desk = draft.desk;
+      pickAgent('claude');
+      pickedModel = draft.model;
+      imported = {
+        skipped: skippedSaid(draft.skipped),
+        servers: draft.servers,
+        sorted: sortServers(draft.servers, known)
+      };
+      step = 0;
+      path = 'odd';
+    } catch (e) {
+      problem = e instanceof Error ? e.message : 'Could not read that agent file.';
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Another choice drops what an imported file filled in, so it starts clean. */
+  function choose(next: 'odd' | 'persona') {
+    if (imported) {
+      imported = undefined;
+      name = role = remit = desk = '';
+      pickedAgent = undefined;
+      pickedAccount = null;
+      pickedModel = null;
+      step = 0;
+    }
+    problem = '';
+    path = next;
+  }
 
   // Fill the window from the proposal. The job description is read from its
   // file now, so edits the owner made in the viewer are in it.
@@ -254,8 +311,9 @@
   async function hire() {
     busy = true;
     problem = '';
-    try {
-      const p = await call<StaffProfile>('/api/staff', {
+    const send = (actsOnHandOffs = false) =>
+      call<StaffProfile>('/api/staff', {
+        actsOnHandOffs,
         name,
         role,
         look: look?.look,
@@ -270,6 +328,7 @@
         remit,
         desk,
         tools,
+        servers: imported?.servers,
         askId: from?.askId,
         job: hasJob
           ? {
@@ -281,7 +340,11 @@
             }
           : undefined
       });
-      onhired(p);
+    try {
+      // A hire at Act waits for the owner's Act check, the first time only,
+      // then for their choice for work another Odd hands it.
+      const p = await (permission === 'act' ? withActCheck(name, send) : send());
+      if (p) onhired(p);
     } catch (e) {
       problem = e instanceof Error ? e.message : String(e);
     } finally {
@@ -298,6 +361,7 @@
     <p class="text-xs leading-relaxed text-muted">{line}</p>
     <button
       class="self-start rounded-lg bg-sea px-3 py-2 text-sm font-medium text-night"
+      disabled={busy}
       onclick={go}>{label}</button
     >
   </div>
@@ -309,14 +373,33 @@
       'Hire an Odd',
       'Make a new worker: you pick its name, look, room and job.',
       'Hire an Odd',
-      () => (path = 'odd')
+      () => choose('odd')
     )}
     {@render choice(
       'Hire a persona',
       'Bring in a ready-made worker from New Altitude, with its own name, look and voice.',
       'Hire a persona',
-      () => (path = 'persona')
+      () => choose('persona')
     )}
+    {@render choice(
+      'Import a Claude Code agent',
+      'Start from its Markdown file. You check its job and access before you hire it.',
+      'Import',
+      () => picker?.click()
+    )}
+    <input
+      bind:this={picker}
+      class="hidden"
+      type="file"
+      accept=".md"
+      aria-label="Claude Code agent file"
+      onchange={(e) => {
+        const file = e.currentTarget.files?.[0];
+        e.currentTarget.value = '';
+        if (file) void importAgent(file);
+      }}
+    />
+    {#if problem}<p class="text-xs text-coral" role="alert">{problem}</p>{/if}
   </section>
 {:else if path === 'persona'}
   <section class="flex h-full min-h-0 flex-col" aria-label="Hire a persona">
@@ -355,6 +438,7 @@
                 <p class="font-semibold text-ink">{o.displayName}</p>
                 {#if o.jobTitle}<p class="text-muted">{o.jobTitle}</p>{/if}
               </div>
+              <PersonaBrief offer={o} />
               {#if o.joined === 'installed'}
                 <p class="mt-auto py-2 text-muted">Works here</p>
               {:else if mine?.waiting}
@@ -454,6 +538,7 @@
           {suggested.displayName} is available as a New Altitude persona. Add the persona instead of building
           an Odd that looks like them.
         </p>
+        <PersonaBrief offer={suggested} />
         <p class="leading-relaxed text-muted">{suggested.disclosure}</p>
       </div>
     </div>
@@ -475,6 +560,15 @@
   </section>
 {:else}
   <section class="flex h-full min-h-0 flex-col" aria-label="Hire an Odd">
+    {#if imported}
+      <div class="flex flex-col gap-1 border-b border-hairline p-3 text-xs text-ink">
+        <AgentFileServers
+          sorted={imported.sorted}
+          once="hired"
+          note={imported.skipped && `Not brought over: ${imported.skipped}.`}
+        />
+      </div>
+    {/if}
     <header class="border-b border-hairline p-3">
       <!-- No title: the window's tab already says Hire. -->
       <div class="text-xs text-muted">

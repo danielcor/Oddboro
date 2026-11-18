@@ -1,0 +1,238 @@
+# The installed-app smoke test (apps/desktop/CLAUDE.md, "Smoke tests") before
+# a release: on each pull request that changes what goes into the app, an
+# unsigned build on Windows, the Mac and Ubuntu, installed and run as an owner
+# would; and by hand (Run workflow), every machine the release builds and tests on.
+# It does not block a merge yet (docs/decisions, the smoke-tests ruling).
+name: App smoke
+
+on:
+  pull_request:
+    branches: [main]
+    # What goes into the app, as release.yml counts it.
+    paths:
+      - apps/desktop/**
+      - apps/office/**
+      - packages/**
+      - .nvmrc
+      - .github/workflows/app-smoke.yml
+      - '!**/CLAUDE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request replaces a run still going.
+concurrency:
+  group: app-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Three machines for a pull request; all six otherwise, with the x86_64
+  # AppImage on Ubuntu 24.04 too, as the release tests it.
+  machines:
+    runs-on: ubuntu-24.04
+    outputs:
+      builds: ${{ steps.pick.outputs.builds }}
+      smokes: ${{ steps.pick.outputs.smokes }}
+    steps:
+      - id: pick
+        env:
+          ALL: ${{ github.event_name != 'pull_request' }}
+        run: |
+          builds='[
+            {"build":"windows-x64","runner":"windows-latest","arch":"x64","cache":"cargo-v2-Windows-x64","target":"x86_64-pc-windows-msvc","bundle":"nsis","file":"*-setup.exe"},
+            {"build":"mac","runner":"macos-15","arch":"aarch64","cache":"cargo-v2-macOS","bundle":"dmg","file":"*.dmg"},
+            {"build":"linux-x86_64","runner":"ubuntu-22.04","arch":"x86_64","cache":"cargo-v2-Linux-x86_64","bundle":"appimage","file":"*.AppImage"}'
+          smokes='[
+            {"build":"windows-x64","runner":"windows-latest"},
+            {"build":"mac","runner":"macos-15"},
+            {"build":"linux-x86_64","runner":"ubuntu-22.04"}'
+          if [ "$ALL" = true ]; then
+            builds="$builds"',
+            {"build":"windows-arm64","runner":"windows-11-arm","arch":"arm64","cache":"cargo-v2-Windows-arm64","target":"aarch64-pc-windows-msvc","bundle":"nsis","file":"*-setup.exe"},
+            {"build":"linux-aarch64","runner":"ubuntu-22.04-arm","arch":"aarch64","cache":"cargo-v2-Linux-aarch64","bundle":"appimage","file":"*.AppImage"}'
+            smokes="$smokes"',
+            {"build":"windows-arm64","runner":"windows-11-arm"},
+            {"build":"linux-aarch64","runner":"ubuntu-22.04-arm"},
+            {"build":"linux-x86_64","runner":"ubuntu-24.04"}'
+          fi
+          echo "builds=$(echo "$builds]" | tr -d '\n ')" >> "$GITHUB_OUTPUT"
+          echo "smokes=$(echo "$smokes]" | tr -d '\n ')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: machines
+    name: build (${{ matrix.build }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.machines.outputs.builds) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install the libraries Tauri builds against
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libxdo-dev \
+            libssl-dev patchelf file build-essential \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav \
+            gstreamer1.0-pulseaudio gstreamer1.0-pipewire
+
+      # The arm64 Windows runner may come without rustup.
+      - name: Install Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf -o "$RUNNER_TEMP/rustup-init.exe" \
+              "https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init.exe"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain none
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # Release's compiled Rust, read and never saved: the repo's cache is
+      # full, and a second copy per machine would push Release's out.
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+            !apps/desktop/src-tauri/target/**/bundle
+          key: ${{ matrix.cache }}-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.cache }}-
+
+      # Tauri's bundlers download NSIS (Windows) and linuxdeploy (Linux) from
+      # GitHub's release downloads on every build, which can answer 504 for
+      # an hour at a time. Kept between runs, they are downloaded once.
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/AppData/Local/tauri
+            ~/.cache/tauri
+          key: tauri-tools-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('apps/desktop/package.json') }}
+
+      - run: npm ci --no-audit --no-fund
+
+      # As in release.yml: on arm64 Windows, rc.exe for the icon and clang for
+      # ring's C code are where the build does not look.
+      - name: Point the build at the SDK's tools
+        if: matrix.arch == 'arm64' && runner.os == 'Windows'
+        run: |
+          rc=$(find "/c/Program Files (x86)/Windows Kits/10/bin" -ipath '*/arm64/rc.exe' 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$rc" ]; then
+            echo "RC=$(cygpath -w "$rc")" >> "$GITHUB_ENV"
+          fi
+          if ! command -v clang >/dev/null; then
+            vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
+              -latest -products '*' -property installationPath | tr -d '\r')
+            llvm="$(cygpath -u "$vs")/VC/Tools/Llvm/ARM64/bin"
+            if [ -d "$llvm" ]; then
+              cygpath -w "$llvm" >> "$GITHUB_PATH"
+            fi
+          fi
+
+      - name: Stage the server
+        run: node apps/desktop/scripts/stage.ts
+
+      # Unsigned, since a pull request from a fork gets no secrets, and newer
+      # than any release, as a release candidate is. Up to five tries for
+      # Tauri's tool downloads, keeping what arrived; only the error pages a
+      # failed download can leave where a tool should be (under 1 KB) go.
+      - name: Build the app
+        run: |
+          echo '{ "version": "9.9.9" }' > "$RUNNER_TEMP/version.conf.json"
+          set -o pipefail
+          for try in 1 2 3 4 5; do
+            if npm run bundle -w @oddboro/desktop -- --config "$RUNNER_TEMP/version.conf.json" 2>&1 \
+              | tee "$RUNNER_TEMP/build.log"; then
+              exit 0
+            fi
+            echo "::warning title=Build try $try failed::$(grep -E 'Downloading|failed to bundle' "$RUNNER_TEMP/build.log" | tail -2 | tr '\n' ' ')"
+            for dir in ~/.cache/tauri "${LOCALAPPDATA:-/nonexistent}/tauri"; do
+              [ -d "$dir" ] && find "$dir" -type f -size -1k -delete
+            done
+            [ "$try" -lt 5 ] && sleep 45
+          done
+          exit 1
+
+      - name: Keep the build
+        run: |
+          mkdir -p "$RUNNER_TEMP/built"
+          find apps/desktop/src-tauri/target/release/bundle/${{ matrix.bundle }} -maxdepth 1 \
+            -name '${{ matrix.file }}' -exec cp {} "$RUNNER_TEMP/built/" \;
+          ls -l "$RUNNER_TEMP/built"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.build }}
+          path: ${{ runner.temp }}/built/
+          if-no-files-found: error
+          retention-days: 3
+
+  smoke:
+    needs: [machines, build]
+    name: smoke (${{ matrix.build }}, ${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.machines.outputs.smokes) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.build }}
+          path: ${{ runner.temp }}/built
+
+      # As in release.yml's smoke job.
+      - name: Install what Linux needs to run the app
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          fuse=libfuse2; if [ "$(lsb_release -rs)" = "24.04" ]; then fuse=libfuse2t64; fi
+          sudo apt-get install -y --no-install-recommends xvfb xauth dbus-x11 gnome-keyring \
+            libsecret-tools "$fuse" webkit2gtk-driver imagemagick xdotool
+          rustup toolchain install stable --profile minimal
+          cargo install tauri-driver --locked --version 2.1.0
+
+      - name: Smoke test the build
+        if: runner.os != 'Linux'
+        shell: bash
+        run: >
+          node apps/desktop/scripts/smoke.ts --from "$RUNNER_TEMP/built" --version 9.9.9
+          --out "$RUNNER_TEMP/smoke"
+
+      - name: Smoke test the build
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -c '
+            echo -n smoke | gnome-keyring-daemon --unlock --components=secrets > /dev/null
+            xvfb-run -a -s "-screen 0 1440x900x24" node apps/desktop/scripts/smoke.ts \
+              --from "$RUNNER_TEMP/built" --version 9.9.9 --out "$RUNNER_TEMP/smoke"'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.build }}-${{ matrix.runner }}
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
+          retention-days: 7

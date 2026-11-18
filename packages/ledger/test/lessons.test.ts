@@ -15,7 +15,9 @@ import {
   ownerNoteOf,
   replacingProblem
 } from '../src/lessons.ts';
+import { plain } from '../src/lesson-rules.ts';
 import type { FollowUpKind } from '../src/schema.ts';
+import { random } from '../src/sequences.ts';
 
 const said = 'Please, keep  reports to “three lines” from now on!';
 
@@ -158,13 +160,75 @@ test("a colleague's note or the office's lines never reach a run as the owner's 
   assert.deepEqual(theirs.sort(), [
     'carry_out',
     'denied',
-    'feedback',
     'first_day',
     'goal',
     'rework',
     'task_done'
   ]);
-  for (const kind of ['hand_off', 'handed_back', 'resume', 'edited'] as const)
+  for (const kind of ['hand_off', 'handed_back', 'resume', 'answered', 'edited'] as const)
     assert.equal(ownerNoteOf({ kind, note: 'a note' }), undefined, kind);
   assert.equal(ownerNoteOf({ kind: 'denied', note: null }), undefined);
+});
+
+// The rule's own spelling of what `plain` trims, never production's, so a
+// change to production's set goes red here.
+const TRIMMED = ' .,!?;:';
+const QUOTE_MARKS = `'"“”‘’\``;
+
+/** Lower case, quote marks dropped, each run of spaces or tabs one space: `plain` before its trim. */
+function beforeTrim(s: string): string {
+  let c = '';
+  for (const ch of s.toLowerCase()) {
+    if (QUOTE_MARKS.includes(ch)) continue;
+    const space = ch === ' ' || ch === '\t';
+    if (space && c.endsWith(' ')) continue;
+    c += space ? ' ' : ch;
+  }
+  return c;
+}
+
+test('plain trims spaces and end punctuation from both ends only, in time linear in its length', () => {
+  const rows: { input: string; expect: string; underMs?: number }[] = [
+    { input: '  Hello, World!  ', expect: 'hello, world' },
+    { input: '“Quoted” text.', expect: 'quoted text' },
+    { input: '...', expect: '' },
+    { input: '', expect: '' },
+    // A long run of marks inside the text: a regex anchored at the end took
+    // over a second on each, quadratic in the run's length.
+    { input: 'a' + '.'.repeat(50_000) + 'b', expect: 'a' + '.'.repeat(50_000) + 'b', underMs: 250 },
+    {
+      input: 'a' + '. '.repeat(25_000) + 'b',
+      expect: 'a' + '. '.repeat(25_000) + 'b',
+      underMs: 250
+    }
+  ];
+  for (const { input, expect, underMs } of rows) {
+    const start = performance.now();
+    const got = plain(input);
+    const ms = performance.now() - start;
+    assert.equal(got, expect, input.slice(0, 20));
+    if (underMs !== undefined) assert.ok(ms < underMs, `${input.slice(0, 20)}: ${ms} ms`);
+  }
+
+  const next = random(203);
+  const letters = 'abcdefghijklmnopqrstuvwxyz \t.,!?;:' + QUOTE_MARKS;
+  for (let i = 0; i < 2_000; i++) {
+    let s = '';
+    for (let n = Math.floor(next() * 16); n > 0; n--)
+      s += letters[Math.floor(next() * letters.length)];
+    const got = plain(s);
+    const c = beforeTrim(s);
+    const k = c.indexOf(got);
+    const m = c.length - k - got.length;
+    const at = JSON.stringify(s);
+    assert.ok(!TRIMMED.includes(got.charAt(0)) || got === '', `${at} starts with a mark`);
+    assert.ok(
+      !TRIMMED.includes(got.charAt(got.length - 1)) || got === '',
+      `${at} ends with a mark`
+    );
+    assert.ok(k >= 0, `${at} is not part of ${JSON.stringify(c)}`);
+    assert.equal(got, c.slice(k, c.length - m), at);
+    for (const ch of c.slice(0, k) + c.slice(c.length - m))
+      assert.ok(TRIMMED.includes(ch), `${at} trimmed ${JSON.stringify(ch)}`);
+  }
 });

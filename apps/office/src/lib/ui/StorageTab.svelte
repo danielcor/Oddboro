@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Storage, under an Odd's Data: everything it has kept in its own folder,
+  // Storage, under an Odd's Knowledge: everything it has kept in its own folder,
   // then under Shared work its part of each thread, one folder per piece of
   // work by its title. Each is a tree of folders that open and close, with
   // each file's size and when it changed. Search filters as the owner types,

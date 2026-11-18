@@ -24,6 +24,8 @@ import {
   ownToolsSaid
 } from './capabilities.ts';
 import { AGENT_NAMES } from './agents.ts';
+import { currentSystem } from './platform.ts';
+import { computerWord } from './system-words.ts';
 import { leavesLine, leavingRefused } from './leaving.ts';
 import { keepBugDraft } from './bug-drafts.ts';
 import { MANAGER_ROLE } from './managers.ts';
@@ -53,7 +55,7 @@ if (has('poke_owner')) {
   tool(
     'poke_owner',
     {
-      description: `Send ${OWNER} a chat message later, once: a check-in after something they planned, or a nudge before it. Write the exact message now, in your voice, short; the office delivers it at that time as a chat from you, with a notification on their Mac. Use it when ${OWNER} asks ("check in on me in an hour"), or when your job says to; in_minutes 0 sends it now. One poke per minute: a new one at the same time replaces the old. Not for anything that needs their yes; that is raise_ask.`,
+      description: `Send ${OWNER} a chat message later, once: a check-in after something they planned, or a nudge before it. Write the exact message now, in your voice, short; the office delivers it at that time as a chat from you, with a notification on their ${computerWord(currentSystem())}. Use it when ${OWNER} asks ("check in on me in an hour"), or when your job says to; in_minutes 0 sends it now. One poke per minute: a new one at the same time replaces the old. Not for anything that needs their yes; that is raise_ask.`,
       inputSchema: {
         message: z.string().min(1).max(500).describe(`Exactly what ${OWNER} reads.`),
         at: z.string().optional().describe(`${ZONE}: "18:50" for today, or "2026-11-02 18:50".`),
@@ -164,15 +166,15 @@ if (offered('withdraw'))
       const line = `${me.name} took it off your desk, as you said in chat: "${OWNER_SAID!.slice(0, 300)}"`;
       const gone: string[] = [];
       const left: string[] = [];
+      // Whether it was still open is the withdrawal's own answer, read under its
+      // locks, so one the owner answered meanwhile is never reported taken off.
       for (const id of new Set(askIds)) {
-        const a = await ask(id);
-        if (a?.staffId !== ME || a.status !== 'open') left.push(`ask ${id}`);
-        else await withdrawAsk(id, line).then(() => gone.push(`ask ${id}`));
+        const mine = (await ask(id))?.staffId === ME;
+        (mine && (await withdrawAsk(id, line)) ? gone : left).push(`ask ${id}`);
       }
       for (const id of new Set(taskIds)) {
-        const t = await task(id);
-        if (t?.staffId !== ME || t.status !== 'open') left.push(`task ${id}`);
-        else await withdrawTask(id, line).then(() => gone.push(`task ${id}`));
+        const mine = (await task(id))?.staffId === ME;
+        (mine && (await withdrawTask(id, line)) ? gone : left).push(`task ${id}`);
       }
       return text(
         [
@@ -328,7 +330,7 @@ if (has('office_report'))
   tool(
     'office_report',
     {
-      description: `Everything the office did in a window: each Odd with its remit, its level (read, draft or act), its tool and what its own tools reach, its folders, the office tools it holds beyond the ones every Odd has, its outside tools (each with what it reaches, or why a run leaves it out), and its jobs and runs, asks open and decided, and tasks for ${OWNER} open and done. For the daily report. followUps is the work owed after ${OWNER} answered: carrying out an approved ask, reworking one they sent back, acting on their feedback on a report, or picking up after a task they finished, each with its outcome (done, failed, waiting on ${OWNER}, or null while still to do). Each run has a trigger: 'schedule' means its timer started it, 'manual' means ${OWNER} pressed Run now. For shared files, lastVerified records the timed file operations the office checked. A run summary alone never verifies a file, its claims, or delivery. Judge a job's timing by its schedule runs only; a manual run at any hour is expected. Every time is ${ZONE}, like the schedules.`,
+      description: `Everything the office did in a window: each Odd with its remit, its level (read, draft or act), its tool and what its own tools reach, its folders, the office tools it holds beyond the ones every Odd has, its outside tools (each with what it reaches, or why a run leaves it out), and its jobs and runs, asks open and decided, and tasks for ${OWNER} open and done. For the daily report. followUps is the work owed after ${OWNER} answered: carrying out an approved ask, reworking one they sent back, hearing their answer to something an Odd raised, or picking up after a task they finished, each with its outcome (done, failed, waiting on ${OWNER}, or null while still to do). Each run has a trigger: 'schedule' means its timer started it, 'manual' means ${OWNER} pressed Run now. For shared files, lastVerified records the timed file operations the office checked. A run summary alone never verifies a file, its claims, or delivery. Judge a job's timing by its schedule runs only; a manual run at any hour is expected. Every time is ${ZONE}, like the schedules.`,
       inputSchema: { hours: z.number().int().min(1).max(168).default(24) }
     },
     async ({ hours }) => {

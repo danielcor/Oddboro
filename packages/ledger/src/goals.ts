@@ -28,25 +28,18 @@ import {
   jobs,
   staff,
   staffGoals,
-  chatCardOf,
   threads,
   type GoalDraft,
   type GoalHealth,
   type GoalPlanItem,
   type GoalStatus,
-  type InChat,
   type JobFiles
 } from './schema.ts';
 import { MANAGER_ROLE, goalReview } from './managers.ts';
 import { HORIZONS } from './goal-words.ts';
-import {
-  addFollowUp,
-  goalThread,
-  goalThreads,
-  type Db,
-  type Tx,
-  type GoalThread
-} from './threads.ts';
+import { goalThreads, type Db, type Tx, type GoalThread } from './threads.ts';
+import { transitionWork } from './work/apply.ts';
+import { GOAL_SET } from './work/asks.ts';
 
 export type GoalRow = typeof goals.$inferSelect;
 export type ProgressRow = typeof goalProgress.$inferSelect;
@@ -171,19 +164,38 @@ export async function manager(q: Db = db): Promise<StaffRow | undefined> {
  * manager then plans it, and reviews every goal once a week from the first one.
  */
 export async function addGoal(d: GoalDraft, source?: number | ChatGoalRequest): Promise<GoalRow> {
-  return db.transaction((tx) => setGoal(tx, d, source));
+  return db.transaction(async (tx) => {
+    const { row, planner } = await setGoal(tx, d, source);
+    if (planner) {
+      // Queuing a run leaves nothing for after the commit (`runQueued`).
+      const went = await transitionWork(
+        {
+          kind: 'runQueued',
+          run: { staffId: planner.id, kind: 'goal', goalId: row.id, note: null },
+          opens: { title: row.title }
+        },
+        { tx }
+      );
+      if ('refused' in went) throw new Error(went.refused);
+    }
+    return row;
+  });
 }
 
 type ChatGoalRequest = { managerId: string; requestId: string };
 
 export class GoalRequestConflict extends Error {}
 
+/**
+ * The goal's row, its line and the manager's weekly review. `planner` is the
+ * manager who plans a goal this call set, and none for a chat submission's
+ * repeat, which set it already.
+ */
 async function setGoal(
   tx: Tx,
   d: GoalDraft,
-  source?: number | ChatGoalRequest,
-  answered?: InChat
-): Promise<GoalRow> {
+  source?: number | ChatGoalRequest
+): Promise<{ row: GoalRow; planner?: StaffRow }> {
   const chat = typeof source === 'object' ? source : undefined;
   const askId = typeof source === 'number' ? source : undefined;
   const m = await manager(tx);
@@ -196,7 +208,7 @@ async function setGoal(
     .returning();
   if (!row && chat) {
     const [saved] = await tx.select().from(goals).where(eq(goals.requestId, chat.requestId));
-    if (saved?.title === d.title) return saved;
+    if (saved?.title === d.title) return { row: saved };
     throw new GoalRequestConflict('This submission already set a different goal.');
   }
   await record(
@@ -211,17 +223,8 @@ async function setGoal(
     },
     tx
   );
-  if (m) {
-    await ensureReview(m, tx);
-    await addFollowUp(tx, {
-      staffId: m.id,
-      kind: 'goal',
-      goalId: row.id,
-      threadId: await goalThread(tx, row.id, m.id),
-      chatCard: chatCardOf(m.id, answered)
-    });
-  }
-  return row;
+  if (m) await ensureReview(m, tx);
+  return { row, planner: m };
 }
 
 /** The manager's weekly review, made once even when two goals arrive together. */
@@ -249,23 +252,36 @@ export async function updateGoal(
   patch: Partial<GoalDraft> & { status?: GoalStatus },
   by: { owner: true } | { staffId: string; askId?: number }
 ): Promise<GoalRow | undefined> {
-  const [row] = await db
-    .update(goals)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(eq(goals.id, id))
-    .returning();
-  if (!row) return undefined;
-  const what = patch.status
-    ? `${patch.status === 'active' ? 'Picked up' : `Marked ${patch.status}`}: ${row.title}`
-    : `Changed the goal: ${row.title}`;
-  await record({
-    kind: 'owner' in by ? 'decision' : 'work',
-    actor: 'owner' in by ? 'owner' : by.staffId,
-    title: what,
-    body: JSON.stringify(patch),
-    askId: 'askId' in by ? by.askId : undefined
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(goals)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(goals.id, id))
+      .returning();
+    if (!row) return undefined;
+    const what = patch.status
+      ? `${patch.status === 'active' ? 'Picked up' : `Marked ${patch.status}`}: ${row.title}`
+      : `Changed the goal: ${row.title}`;
+    await record(
+      {
+        kind: 'owner' in by ? 'decision' : 'work',
+        actor: 'owner' in by ? 'owner' : by.staffId,
+        title: what,
+        body: JSON.stringify(patch),
+        askId: 'askId' in by ? by.askId : undefined
+      },
+      tx
+    );
+    if (patch.status) {
+      // A status change leaves nothing for after the commit (`goalStatusChanged`).
+      const went = await transitionWork(
+        { kind: 'goalStatusChanged', goalId: id, status: patch.status },
+        { tx }
+      );
+      if ('refused' in went) throw new Error(went.refused);
+    }
+    return row;
   });
-  return row;
 }
 
 /**
@@ -303,7 +319,7 @@ export async function serveGoal(
 /**
  * The owner hired from a proposed hire. The hire serves the goal it was
  * proposed for in the transaction that approves the ask, since the answer
- * wakes the goal's lead to hand the hire its first piece. If the link fails,
+ * wakes the goal's lead to hand the hire its first piece. If linking fails,
  * the ask stays open and nobody is woken. `note` goes back with the answer,
  * as when the owner added a persona in place of the proposed Odd.
  */
@@ -313,10 +329,16 @@ export async function approveHire(
   note: string | null = null
 ): Promise<void> {
   const approved = await approveAsk(askId, note, {
-    link: async (a, tx) => {
-      if (a.kind !== 'hire') throw new Error('That is not a proposed hire');
-      if (a.hire?.goal) await serveGoal(staffId, a.hire.goal.id, a.hire.goal.part, tx, askId);
-    }
+    perKind: [
+      {
+        name: 'serve goal',
+        run: async (tx) => {
+          const a = await ask(askId, tx);
+          if (a?.kind !== 'hire') throw new Error('That is not a proposed hire');
+          if (a.hire?.goal) await serveGoal(staffId, a.hire.goal.id, a.hire.goal.part, tx, askId);
+        }
+      }
+    ]
   });
   if (!approved) throw new Error('That proposal is no longer open');
 }
@@ -378,16 +400,23 @@ export async function approveGoal(
   if (a?.kind !== 'goal' || !a.goal || a.status !== 'open')
     throw fixedError('That goal is no longer open');
   const draft = a.goal;
-  const chat: InChat | undefined = inChat
-    ? { staffId: a.staffId, card: { kind: 'ask', id: a.id, title: a.title } }
-    : undefined;
   let set: GoalRow | undefined;
-  await approveAsk(askId, reason, {
-    link: async (_, tx) => {
-      set = await setGoal(tx, draft, askId, chat);
-    }
+  // The yes's decider plans the goal this sets, pointing at it by `GOAL_SET`.
+  const approved = await approveAsk(askId, reason, {
+    perKind: [
+      {
+        name: GOAL_SET,
+        run: async (tx) => {
+          set = (await setGoal(tx, draft, askId)).row;
+          return { id: set.id };
+        }
+      }
+    ],
+    inChat
   });
-  if (!set) throw fixedError('That goal is no longer open');
+  // A `set` from a run Postgres ended to break a deadlock rolled back, and the
+  // next run may find the ask answered already.
+  if (!approved || !set) throw fixedError('That goal is no longer open');
   return set;
 }
 
@@ -399,13 +428,15 @@ const itemLabel = (names: Map<string, string>) => (i: GoalPlanItem) =>
 
 /**
  * A plan ask approved, with the parts the owner ticked. Staff already here take
- * on their part in the transaction that approves the ask, so a part that fails
- * leaves the plan open. Each hire becomes a hire ask on the plan's thread,
- * which the page opens in the hire window, and the owner's own steps a task on
- * their desk. Only then does the answer bring the plan's Odd back to the goal's
- * thread to lead the work, so its run finds all of it. Hiring one of the plan's
- * hires answers its ask, and that brings the Odd back there again. Approved
- * on its card in the Odd's chat (`inChat`), that pick-up replies there.
+ * on their part and their jobs, each hire becomes a hire ask on the plan's
+ * thread, which the page opens in the hire window, and the owner's own steps
+ * a task on their desk, all in the transaction that approves the ask, so a
+ * part that fails leaves the whole plan open. The answer that brings the
+ * plan's Odd back to the goal's thread to lead the work commits with them, so
+ * its run finds all of it, the hire asks it waits on among them. Hiring one
+ * of the plan's hires answers its ask, and that brings the Odd back there
+ * again. Approved on its card in the Odd's chat (`inChat`), that pick-up
+ * replies there.
  */
 export async function approvePlan(
   askId: number,
@@ -458,47 +489,64 @@ export async function approvePlan(
   refuseFileCycle(after);
   const hires: AskRow[] = [];
   const approved = await approveAsk(askId, note, {
-    link: async (_, tx) => {
-      for (const item of picked)
-        if (item.kind === 'assign') await serveGoal(item.staff, g.id, item.part, tx, askId);
-    },
-    carryOut: async () => {
-      for (const item of picked) {
-        if (item.kind === 'assign') {
-          if (item.job)
-            await addJob({ staffId: item.staff, ...item.job, files: files(item.job.files) });
-          if (item.editJob)
-            await editOwnJob(
-              item.staff,
-              item.editJob.name,
+    perKind: [
+      {
+        name: 'plan',
+        run: async (tx) => {
+          // A run Postgres ended to break a deadlock rolled its hire asks back.
+          hires.length = 0;
+          for (const item of picked)
+            if (item.kind === 'assign') await serveGoal(item.staff, g.id, item.part, tx, askId);
+          for (const item of picked) {
+            if (item.kind === 'assign') {
+              if (item.job)
+                await addJob(
+                  { staffId: item.staff, ...item.job, files: files(item.job.files) },
+                  tx
+                );
+              if (item.editJob)
+                await editOwnJob(
+                  item.staff,
+                  item.editJob.name,
+                  {
+                    name: item.editJob.newName,
+                    instructions: item.editJob.instructions,
+                    schedule: item.editJob.schedule,
+                    missed: item.editJob.missed,
+                    files: files(item.editJob.files)
+                  },
+                  { askId },
+                  tx
+                );
+            } else {
+              const { ask: h } = await raiseAsk(
+                a.staffId,
+                {
+                  title: `Hire ${item.hire.name}, ${item.hire.role}`,
+                  why: `For the goal "${g.title}": ${item.part}`,
+                  ifApproved: 'The hire window opens with this filled in. You hire from there.',
+                  hire: { ...item.hire, goal: { id: g.id, part: item.part } },
+                  threadId: a.threadId ?? undefined
+                },
+                tx
+              );
+              hires.push(h);
+            }
+          }
+          if (plan.ownerSteps?.length)
+            await giveTask(
+              a.staffId,
               {
-                name: item.editJob.newName,
-                instructions: item.editJob.instructions,
-                schedule: item.editJob.schedule,
-                missed: item.editJob.missed,
-                files: files(item.editJob.files)
+                title: `For "${g.title}": yours to do`,
+                why: 'The part of the plan only you can do.',
+                steps: plan.ownerSteps,
+                byOffice: true
               },
-              { askId }
+              tx
             );
-        } else {
-          const { ask: h } = await raiseAsk(a.staffId, {
-            title: `Hire ${item.hire.name}, ${item.hire.role}`,
-            why: `For the goal "${g.title}": ${item.part}`,
-            ifApproved: 'The hire window opens with this filled in. You hire from there.',
-            hire: { ...item.hire, goal: { id: g.id, part: item.part } },
-            threadId: a.threadId ?? undefined
-          });
-          hires.push(h);
         }
       }
-      if (plan.ownerSteps?.length)
-        await giveTask(a.staffId, {
-          title: `For "${g.title}": yours to do`,
-          why: 'The part of the plan only you can do.',
-          steps: plan.ownerSteps,
-          byOffice: true
-        });
-    },
+    ],
     inChat
   });
   if (!approved) throw fixedError('That plan is no longer open');

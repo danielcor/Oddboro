@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { join, dirname } from 'node:path';
 import {
   cpSync,
@@ -13,7 +11,17 @@ import {
   type FSWatcher
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { home, STAFF_SERVER, type ProjectSession, type ProjectRequest } from '@oddboro/ledger';
+import {
+  home,
+  STAFF_SERVER,
+  PROJECT_RECEIVERS,
+  type ProjectSession,
+  type ProjectRequest
+} from '@oddboro/ledger';
+import { pathToFileURL } from 'node:url';
+import { AGENT_NAMES } from '@oddboro/ledger/agents';
+import { currentSystem, probe } from '@oddboro/ledger/platform';
+import { computerWord } from '@oddboro/ledger/system-words';
 import { nativeCommand, nativeEnv } from './native.ts';
 import { savedClaudeSessions } from './claude-sessions.ts';
 type Active = {
@@ -25,20 +33,68 @@ type Active = {
   status?: string;
   waitingFor?: string;
 };
-export async function claudeProjects(folder: string) {
+/**
+ * What the owner reads when Claude Code cannot list a project's conversations.
+ * The project-sessions route shows a thrown message as it is, so a raw error
+ * from starting the command (its path, ENOENT) never reaches the owner.
+ * `missing` names the system as it is when the listing fails, not as this file
+ * loaded, since a test fakes the system after that.
+ */
+export const CLAUDE_LIST_FAILED = {
+  missing: () => `${AGENT_NAMES.claude} is not installed on this ${computerWord(currentSystem())}.`,
+  failed: `${AGENT_NAMES.claude} could not list this project's conversations. Try again.`
+};
+
+/**
+ * The sessions `claude agents --json` printed, or undefined when it printed
+ * anything but a list. Entries that are not objects are left out.
+ */
+function agentList(out: string): Active[] | undefined {
+  let list: unknown;
+  try {
+    list = JSON.parse(out);
+  } catch {
+    // The caller tells the owner the listing failed; the parser's own words
+    // would show them a raw SyntaxError.
+    return undefined;
+  }
+  if (!Array.isArray(list)) return undefined;
+  return list.filter((a): a is Active => typeof a === 'object' && a !== null);
+}
+
+/** The Claude Code sessions running in `folder`, from `claude agents --json`. */
+async function claudeAgents(folder: string): Promise<Active[]> {
   const [exe, prefix] = nativeCommand('claude');
+  const r = await probe(exe, [...prefix, 'agents', '--json', '--cwd', folder], {
+    env: nativeEnv(),
+    cwd: folder,
+    timeout: 10000,
+    maxBuffer: 4_000_000
+  });
+  switch (r.status) {
+    case 'ok': {
+      const list = agentList(r.out);
+      if (!list) throw new Error(CLAUDE_LIST_FAILED.failed);
+      return list;
+    }
+    case 'missing':
+      throw new Error(CLAUDE_LIST_FAILED.missing());
+    case 'failed':
+    case 'timeout':
+      throw new Error(CLAUDE_LIST_FAILED.failed);
+    default: {
+      const missed: never = r;
+      throw new Error(`claude agents came back as ${JSON.stringify(missed)}`);
+    }
+  }
+}
+
+export async function claudeProjects(folder: string) {
   const [history, processes] = await Promise.all([
     savedClaudeSessions(folder),
-    promisify(execFile)(exe, [...prefix, 'agents', '--json', '--cwd', folder], {
-      env: nativeEnv(),
-      cwd: folder,
-      timeout: 10000,
-      maxBuffer: 4_000_000
-    })
+    claudeAgents(folder)
   ]);
-  const active = (JSON.parse(processes.stdout) as Active[]).filter(
-    (a) => a.cwd === folder && a.sessionId
-  );
+  const active = processes.filter((a) => a.cwd === folder && a.sessionId);
   const rows = new Map(
     history
       .filter((h) => !h.cwd || h.cwd === folder)
@@ -97,7 +153,11 @@ export function prepareClaude(s: ProjectSession) {
       JSON.stringify(box) +
       ',' +
       JSON.stringify(s.nativeId) +
-      '); await import("./watch.mjs");\n'
+      ',' +
+      JSON.stringify(s.folder) +
+      '); await import(' +
+      JSON.stringify(pathToFileURL(join(ledger, 'src', 'project-watch' + ext)).href) +
+      ');\n'
   );
   // The monitor runs in a POSIX shell, including Git Bash on Windows.
   // Desktop installs can have a bundled Node without a node on the PATH.
@@ -122,6 +182,38 @@ export function prepareClaude(s: ProjectSession) {
     ]
   });
   return { plugin, market, box };
+}
+/** Each send checks both live receivers, with no prompt leaving before they answer. */
+export async function checkClaudeReceiver(s: ProjectSession) {
+  const box = boxOf(s),
+    key = randomUUID();
+  const replies = PROJECT_RECEIVERS.map((receiver) => join(box, key + '.' + receiver));
+  let watcher: FSWatcher | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const check = () => {
+        if (replies.every((file) => existsSync(file))) resolve();
+      };
+      watcher = watch(box, check);
+      watcher.on('error', reject);
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              'Claude’s office plugin is not ready. In Details, connect the plugin and reload it in this conversation, then retry. Nothing was sent.'
+            )
+          ),
+        30_000
+      );
+      jsonFile(join(box, 'probe.json'), { key });
+      check();
+    });
+  } finally {
+    watcher?.close();
+    clearTimeout(timer);
+    for (const file of [join(box, 'probe.json'), ...replies]) rmSync(file, { force: true });
+  }
 }
 export function postClaude(s: ProjectSession, r: ProjectRequest) {
   jsonFile(join(boxOf(s), 'offer.json'), { id: r.id, prompt: r.prompt });

@@ -110,7 +110,7 @@ async function thread(title: string, hub: string, ...colleagues: string[]): Prom
   const [{ id }] = await L.pg<{ id: number }[]>`
     insert into threads (title, hub_id, holder_id) values (${title}, ${hub}, ${hub}) returning id`;
   for (const c of colleagues)
-    await L.pg`insert into follow_ups (staff_id, kind, thread_id, outcome) values (${c}, 'hand_off', ${id}, 'done')`;
+    await L.pg`insert into follow_ups (staff_id, kind, thread_id, outcome, done_at) values (${c}, 'hand_off', ${id}, 'done', now())`;
   return id;
 }
 const put = (path: string, text = 'made'): string => {

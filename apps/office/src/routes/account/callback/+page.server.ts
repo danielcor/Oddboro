@@ -9,6 +9,7 @@ import {
   SignInRefused
 } from '#lib/server/account.ts';
 import { endPersonaGrants, finishPersonaGrant, personaOf } from '#lib/server/persona.ts';
+import { signInRefusal } from '#lib/server/sign-in-refusal.ts';
 import type { PageServerLoad } from './$types';
 
 const failed = (message: string) => ({ ok: false, title: 'Not signed in', message });
@@ -22,7 +23,7 @@ export const load: PageServerLoad = async ({ url }) => {
   const again = persona
     ? 'Press Add or Reconnect in Oddboro again.'
     : 'Try Sign in again from Oddboro.';
-  if (denied) return failed(`New Altitude said: ${denied}. ${again}`);
+  if (denied) return failed(signInRefusal('New Altitude', denied, again));
   if (!code || !state) return failed(`The sign-in came back without a code. ${again}`);
   try {
     if (persona) {

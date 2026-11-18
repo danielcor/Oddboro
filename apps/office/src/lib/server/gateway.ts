@@ -181,7 +181,7 @@ function whyNoStart(e: unknown): string {
  * One Ledger line, the first time this run finds a connector will not start.
  * A line that cannot be written is logged and dropped: the run still gets the
  * connector's own error, as it does with no line at all. Nothing here rejects,
- * so no caller has to wait for it, and none should: the line waits on Ollama.
+ * so no caller has to wait for it, and none should: the line waits on its vector.
  */
 async function tellNoStart(c: ConnectorRow, h: Held, e: unknown): Promise<void> {
   if (h.toldNoStart) return;

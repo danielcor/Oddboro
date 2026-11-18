@@ -7,24 +7,30 @@
 
 mod diagnostics;
 mod env;
+mod host;
+mod key;
 mod secrets;
 mod server;
 mod update;
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::{NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use diagnostics::Diagnostics;
+use key::Key;
 use server::Server;
 
 const MAIN: &str = "main";
@@ -35,7 +41,7 @@ const NO_NODE: &str = "Oddboro cannot find its copy of Node. Reinstall Oddboro."
 const NO_SERVER: &str = "Oddboro cannot find the office server. Reinstall Oddboro.";
 
 /// Why the shell quit, as its exit code, so a script can tell without the
-/// dialog the owner saw. The dialog's words go to the log too (`alert`).
+/// dialog the owner saw. The dialog's words go to the log too (`startup_error`).
 mod exit {
     pub const PORT_TAKEN: i32 = 2;
     pub const NO_NODE: i32 = 3;
@@ -136,7 +142,8 @@ fn start(app: &AppHandle, diagnostics: Option<&Diagnostics>) {
     );
     if let Some(url) = server_url {
         match Url::parse(&url) {
-            Ok(url) => open_main(app, &url),
+            // A server the shell did not start has no key to give it.
+            Ok(url) => open_main(app, &url, None),
             Err(e) => fail(
                 app,
                 exit::BAD_URL,
@@ -153,13 +160,13 @@ fn start(app: &AppHandle, diagnostics: Option<&Diagnostics>) {
     }
 
     if server::port_taken(port) {
-        alert(
+        fail(
             app,
+            exit::PORT_TAKEN,
             &format!(
                 "Another office is already running on port {port}. Oddboro will quit rather than share it.\n\nQuit the other office, then open Oddboro again."
             ),
         );
-        app.exit(exit::PORT_TAKEN);
         return;
     }
     let Some(node) = node_binary() else {
@@ -170,11 +177,6 @@ fn start(app: &AppHandle, diagnostics: Option<&Diagnostics>) {
     };
 
     show_loading(app);
-    let update_token = if update::ENABLED {
-        update::token()
-    } else {
-        String::new()
-    };
     let server = Server {
         node,
         code,
@@ -183,7 +185,7 @@ fn start(app: &AppHandle, diagnostics: Option<&Diagnostics>) {
         home: env::office_home(),
         log: env::log_file(),
         version: app.package_info().version.to_string(),
-        update_token: update_token.clone(),
+        updates: update::ENABLED,
         diagnostics_dsn: diagnostics.map(|d| d.dsn().to_string()),
     };
     let Ok(url) = Url::parse(&server.url()) else {
@@ -196,15 +198,20 @@ fn start(app: &AppHandle, diagnostics: Option<&Diagnostics>) {
     update::watch(update::Watch {
         app: app.clone(),
         port,
-        token: update_token,
         log: server.log.clone(),
         show: show_updating,
     });
-    if let Err(why) = server.supervise(|| open_main(app, &url)) {
+    // Each start of Node has its own key, which it has just proved it holds.
+    if let Err(why) = server.supervise(|| open_main(app, &url, key::current().as_ref())) {
         if let Some(d) = diagnostics {
             d.gave_up(&why);
         }
-        fail(app, exit::SERVER_FAILED, &why.message(&server.log_tail()));
+        startup_error(
+            app,
+            exit::SERVER_FAILED,
+            &why.message(&server.log_tail()),
+            why.report(),
+        );
     }
 }
 
@@ -298,27 +305,42 @@ fn loading(app: &AppHandle, updating: &str) {
         .build();
 }
 
-/// Opens the office in the main window, or reloads it after a restart.
-fn open_main(app: &AppHandle, url: &Url) {
+/// Opens the office in the main window, or reloads it after a restart. With
+/// the app's key the window opens on a blank page, so it asks the office for
+/// nothing until its cookie is in place (`open_with_key`). Off the main thread.
+fn open_main(app: &AppHandle, url: &Url, key: Option<&Arc<Key>>) {
     if let Some(window) = app.get_webview_window(MAIN) {
-        let _ = window.navigate(url.clone());
+        match key {
+            Some(key) => open_with_key(&window, key, url),
+            None => {
+                let _ = window.navigate(url.clone());
+            }
+        }
         return;
     }
+    let first = match key {
+        Some(_) => Url::parse("about:blank").unwrap_or_else(|_| url.clone()),
+        None => url.clone(),
+    };
     let home = url.clone();
-    let built = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(url.clone()))
+    let office = url.clone();
+    let keyed = key.is_some();
+    let built = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(first))
         .title("Oddboro")
         .inner_size(1280.0, 820.0)
         .min_inner_size(960.0, 600.0)
         .center()
         .on_navigation(move |to| stay_or_open(&home, to))
-        .on_new_window(|to, _| {
-            open_in_browser(&to);
+        .on_new_window(move |to, _| {
+            open_new_window(&office, keyed, &to);
             NewWindowResponse::Deny
         })
         // The window's side of a start, for the log: the page itself says it
         // booted once its script runs (`apps/office/src/hooks.client.ts`).
         .on_page_load(|_, payload| {
-            if matches!(payload.event(), PageLoadEvent::Finished) {
+            if matches!(payload.event(), PageLoadEvent::Finished)
+                && payload.url().scheme() != "about"
+            {
                 server::note(
                     &env::log_file(),
                     &format!("office page loaded: {}", payload.url()),
@@ -329,13 +351,74 @@ fn open_main(app: &AppHandle, url: &Url) {
     if let Some(loading) = app.get_webview_window(LOADING) {
         let _ = loading.close();
     }
-    if let Err(e) = built {
-        fail(
+    match (built, key) {
+        (Ok(window), Some(key)) => open_with_key(&window, key, url),
+        (Ok(_), None) => {}
+        (Err(e), _) => fail(
             app,
             exit::NO_WINDOW,
             &format!("Oddboro could not open its window: {e}"),
-        );
+        ),
     }
+}
+
+/// Gives the window the key's cookie, then opens the office in it. The webview
+/// stores a cookie on its own time, so the shell waits until the webview
+/// reads it back, up to 5 seconds, before it opens the office. It reads the
+/// whole jar: wry's `cookies_for_url` matches no IP address host.
+fn open_with_key(window: &WebviewWindow, key: &Key, url: &Url) {
+    let cookie = key.cookie(url);
+    let _ = window.set_cookie(cookie.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let held = || {
+        window.cookies().is_ok_and(|all| {
+            all.iter()
+                .any(|c| c.name() == cookie.name() && c.value() == cookie.value())
+        })
+    };
+    while !held() {
+        if Instant::now() > deadline {
+            server::note(
+                &env::log_file(),
+                "the window did not take the key's cookie within 5 seconds",
+            );
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = window.navigate(url.clone());
+}
+
+/// A link the page opens in a new window (`target="_blank"`, `window.open`)
+/// goes to the default browser. The browser has no key, so an address of the
+/// office's own, such as a file attached in a chat, goes there as a link the
+/// office makes for that one path, which works once within a minute. On its
+/// own thread: it asks the office first, with the key of the Node that runs
+/// now. `keyed` is false for a server the shell did not start.
+fn open_new_window(office: &Url, keyed: bool, to: &Url) {
+    if !keyed || to.origin() != office.origin() {
+        return open_in_browser(to);
+    }
+    let (office, to) = (office.clone(), to.clone());
+    thread::spawn(move || match browser_link(&office, &to) {
+        Some(link) => open_in_browser(&link),
+        None => server::note(
+            &env::log_file(),
+            "the office made no link for the browser, so nothing opened",
+        ),
+    });
+}
+
+/// `to` with the office's one-time code for its path added.
+fn browser_link(office: &Url, to: &Url) -> Option<Url> {
+    let port = office.port_or_known_default()?;
+    let body = serde_json::json!({ "path": to.path() });
+    let key = key::current()?;
+    let answer = server::call(port, &key, "POST", "/api/browser-link", Some(&body))?;
+    let code = answer["code"].as_str()?;
+    let mut link = to.clone();
+    link.query_pairs_mut().append_pair(key::LINK_QUERY, code);
+    Some(link)
 }
 
 /// The office's own origin stays in the window. Links anywhere else open in
@@ -356,7 +439,7 @@ fn open_in_browser(url: &Url) {
         return;
     }
     let (opener, first) = OPENER;
-    let spawned = Command::new(opener)
+    let spawned = crate::host::host_command(opener)
         .args(first)
         .arg(url.as_str())
         .stdin(Stdio::null())
@@ -471,22 +554,79 @@ fn toggle_open_at_login(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) {
     let _ = item.set_checked(launcher.is_enabled().unwrap_or(false));
 }
 
-/// Shows an error. Only call it off the main thread: it waits for OK.
-/// The words go to the log first, on one line: the dialog waits for someone to
-/// press OK, which nobody does in a test or a support case.
-fn alert(app: &AppHandle, message: &str) {
+/// Keep the latest startup report beside the office log, even if no window opens.
+fn startup_error(app: &AppHandle, code: i32, message: &str, reason: &str) {
+    let log = env::log_file();
     let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    server::note(&env::log_file(), &format!("dialog: {line}"));
+    server::note(&log, &format!("dialog: {line}"));
+    let report_path = log.with_extension("support.txt");
+    let version = app.package_info().version.to_string();
+    let report = startup_report(&version, reason, code, &log);
+    let message = if save_startup_report(&report_path, &report).is_ok() {
+        format!(
+            "{message}\n\nSupport report saved to {}",
+            report_path.display()
+        )
+    } else {
+        format!("{message}\n\nThe support report could not be saved.")
+    };
     app.dialog()
         .message(message)
         .title("Oddboro")
         .kind(MessageDialogKind::Error)
         .blocking_show();
+    app.exit(code);
+}
+
+fn save_startup_report(path: &std::path::Path, report: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().unwrap_or(std::path::Path::new(".")))?;
+    file.write_all(report.as_bytes())?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn startup_report(version: &str, reason: &str, code: i32, log: &std::path::Path) -> String {
+    // This also works when the office bundle cannot start. A missing Node
+    // still leaves the owner the exact startup failure and exit code.
+    let module = concat!(
+        include_str!("../../../office/src/lib/server/support-report.js"),
+        "\nprocess.stdout.write(await supportReport(process.argv[1], process.argv[2]));"
+    );
+    let detailed = node_binary()
+        .and_then(|node| {
+            std::process::Command::new(node)
+                .env_remove("NODE_OPTIONS")
+                .args(["--input-type=module", "-e", module, "--"])
+                .arg(log)
+                .arg(version)
+                .output()
+                .ok()
+        })
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok());
+    let mut report = detailed.unwrap_or_else(|| {
+        format!(
+            "Oddboro support report\nVersion: {version}\nSystem: {} {}\nOffice log unavailable.\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    });
+    report.push_str(&format!("Startup failure ({code}): {reason}\n"));
+    report
 }
 
 fn fail(app: &AppHandle, code: i32, message: &str) {
-    alert(app, message);
-    app.exit(code);
+    let reason = match code {
+        exit::PORT_TAKEN => "Office port already in use",
+        exit::NO_NODE => NO_NODE,
+        exit::NO_SERVER => NO_SERVER,
+        exit::BAD_URL => "Invalid office address",
+        exit::NO_WINDOW => "Office window could not open",
+        _ => "Office could not start",
+    };
+    startup_error(app, code, message, reason);
 }
 
 /// What the launch line says the shell opens: the server `ODDBORO_SERVER_URL`

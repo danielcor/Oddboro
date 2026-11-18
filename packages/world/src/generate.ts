@@ -194,6 +194,7 @@ export const EXTRAS: Record<string, string> = {
   'art-frame': 'framed art on the wall',
   whiteboard: 'a whiteboard on the wall',
   'wall-clock': 'a clock on the wall',
+  'winter-wreath': 'an evergreen holiday wreath with a ribbon on the wall',
   'owner-photos': 'photos on the wall',
   'break-poster': 'a poster on the wall',
   'break-dartboard': 'a dartboard on the wall',

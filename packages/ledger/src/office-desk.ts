@@ -1,6 +1,6 @@
 // Reports, and the desk that lists what waits on the owner.
 import { proposedProjectWork } from './project-sessions.ts';
-import { and, asc, desc, eq, exists, gt, isNotNull, isNull, not, or } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, gt, inArray, isNotNull, isNull, not, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { db } from './db.ts';
 import { type Db } from './threads.ts';
@@ -47,6 +47,11 @@ export type Desk = {
    * (`shownFolder`), which only the server can work out.
    */
   folders: Record<number, string>;
+  /**
+   * The open tasks given for an access ask that only connects the tool
+   * (`connectOnly`): marking one done starts no work of the Odd's own.
+   */
+  connectOnly: number[];
   /** The jobs that skipped a run while the office was off: the While you were away card. */
   away: AwayJob[];
 };
@@ -121,8 +126,21 @@ export async function desk(): Promise<Desk> {
     folders: Object.fromEntries(
       shown.flatMap((x) => (x.folder ? [[x.id, shownFolder(x.folder.path)]] : []))
     ),
+    connectOnly: await connectOnlyTasks(t),
     away: await awayJobs()
   };
+}
+
+/** Which of these tasks came from an access ask that only connects the tool. */
+async function connectOnlyTasks(open: TaskRow[]): Promise<number[]> {
+  const ids = open.flatMap((t) => (t.askId === null ? [] : [t.askId]));
+  if (!ids.length) return [];
+  const only = new Set(
+    (await db.select({ id: asks.id, access: asks.access }).from(asks).where(inArray(asks.id, ids)))
+      .filter((a) => a.access?.connectOnly)
+      .map((a) => a.id)
+  );
+  return open.filter((t) => t.askId !== null && only.has(t.askId)).map((t) => t.id);
 }
 
 /** An ask or task an Odd has open on the owner's desk, as its prompt lists it. */

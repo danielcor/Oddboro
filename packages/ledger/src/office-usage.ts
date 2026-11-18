@@ -1,9 +1,9 @@
 // Token usage, the owner's plan and its window, and the owner's name and welcome.
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, sql as pg } from './db.ts';
 import { fixedError } from './errors.ts';
 import { type Db } from './threads.ts';
-import { owner, planLimits, usage, type UsageKind } from './schema.ts';
+import { asks, owner, planLimits, usage, type UsageKind } from './schema.ts';
 import { zone } from './time.ts';
 
 // Usage and the plan
@@ -35,6 +35,18 @@ export async function recordUsage(staffId: string | null, kind: UsageKind, byMod
   if (rows.length) await db.insert(usage).values(rows);
 }
 
+/** The plan's one row in plan_limits: the owner's Claude plan, whose windows each run reports. */
+export const PLAN_ROW = 'claude';
+/** The plan's 5-hour window: one that resets at a time began this long before it. */
+export const WINDOW_MS = 5 * 3_600_000;
+
+/**
+ * When the window that resets at `resets` began. A window ask raised after
+ * it is this window's ask. The loader (`windowNow` in work/load.ts) tests that
+ * in SQL and the office clock (`windowAsksDue`) in code, both against this.
+ */
+export const windowBegan = (resets: Date): Date => new Date(resets.getTime() - WINDOW_MS);
+
 export type PlanWindows = {
   fiveHour: number;
   fiveHourResetsAt: Date | null;
@@ -46,8 +58,31 @@ export type PlanWindows = {
 export async function setPlanLimits(w: Partial<PlanWindows>): Promise<void> {
   await db
     .insert(planLimits)
-    .values({ id: 'claude', fiveHour: 0, sevenDay: 0, ...w, updatedAt: new Date() })
+    .values({ id: PLAN_ROW, fiveHour: 0, sevenDay: 0, ...w, updatedAt: new Date() })
     .onConflictDoUpdate({ target: planLimits.id, set: { ...w, updatedAt: new Date() } });
+}
+
+/** Why the office takes a window ask nobody answered off the desk at its window's reset. */
+export const WINDOW_ASK_LAPSED = 'The window reset before an answer.';
+
+/**
+ * Each open window ask, and when its window resets, for the office clock to
+ * take it off the desk then: the ask is about that window, so it leaves when
+ * the window does, whatever work it still holds. This window's ask (raised
+ * after `windowBegan`) is due at the reset; one from an older window is due
+ * already; with no reset reported, a window lasts `WINDOW_MS` at most.
+ */
+export async function windowAsksDue(): Promise<{ id: number; at: Date }[]> {
+  const [row] = await db.select().from(planLimits).where(eq(planLimits.id, PLAN_ROW));
+  const resets = row?.fiveHourResetsAt ?? null;
+  const open = await db
+    .select({ id: asks.id, createdAt: asks.createdAt })
+    .from(asks)
+    .where(and(eq(asks.kind, 'window'), eq(asks.status, 'open')));
+  return open.map(({ id, createdAt }) => {
+    if (!resets) return { id, at: new Date(createdAt.getTime() + WINDOW_MS) };
+    return { id, at: createdAt > windowBegan(resets) ? resets : createdAt };
+  });
 }
 
 /** What the staff call the owner. "the owner" until the install sets a name. */
@@ -80,7 +115,7 @@ export async function setOwnerName(name: string): Promise<void> {
 
 /** The plan windows as last reported. A window past its reset reads as unused. */
 export async function plan() {
-  const [row] = await db.select().from(planLimits).where(eq(planLimits.id, 'claude'));
+  const [row] = await db.select().from(planLimits).where(eq(planLimits.id, PLAN_ROW));
   if (!row) return null;
   const now = new Date();
   const fresh = (used: number, resetsAt: Date | null) => (resetsAt && resetsAt <= now ? 0 : used);

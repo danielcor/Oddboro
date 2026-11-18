@@ -8,8 +8,6 @@ import { eq } from 'drizzle-orm';
 import { connectors, grants, ledger, staff } from '../src/schema.ts';
 import { db } from './pglite.ts';
 
-// The ledger rows embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const { changesSaid, connector, refreshTools, toolsChanged } = await import('../src/office.ts');
 
 await db.insert(staff).values({

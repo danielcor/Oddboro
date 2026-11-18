@@ -12,7 +12,8 @@ import {
   OFFICE_FILE_NAMES,
   chatSession,
   replyToReport,
-  takeBugDraft
+  takeBugDraft,
+  takeUpdateRequest
 } from '@oddboro/ledger';
 import { reserveRun, releaseRun } from '@oddboro/ledger/run-registry';
 import { firstQuestionIn, nextFirstQuestion } from '@oddboro/ledger/first-questions';
@@ -20,7 +21,7 @@ import type { ChatEntry, ChatEvent, ChatRef } from '#lib/staff/chat.ts';
 import { isPicture, type ChatFile } from '#lib/attachments.ts';
 import { splitChoices } from '#lib/choices.ts';
 import { run, runHomeOf, type Run } from './staff.ts';
-import { chatRun } from './run-state.ts';
+import { chatRun, show } from './run-state.ts';
 import { addToChat, history, keepOwnerTurn, ChatInputError } from './chat-turns.ts';
 import { attachedFiles, filesNow } from './chat-files.ts';
 import { replyBrief, savedTaskWords } from './chat-delivery.ts';
@@ -36,6 +37,7 @@ import {
   type Session
 } from './chat-preface.ts';
 import { bus, emit } from './events.ts';
+import { askShellToCheck, MANAGED } from './update.ts';
 
 const CHAT_TIMEOUT_MS = 5 * 60_000;
 
@@ -123,13 +125,16 @@ export async function replyToOwnerTurn(
       type: 'done',
       text: answered.text,
       ...(answered.choices?.length ? { choices: answered.choices } : {}),
-      ...(answered.bug ? { bug: answered.bug } : {})
+      ...(answered.bug ? { bug: answered.bug } : {}),
+      ...(answered.updates ? { updates: true } : {})
     });
     return;
   }
   if (chatRun(id)) throw new Error('Another reply is in progress. Your message is saved.');
   // No await between checking and reserving: a second page sees this attempt.
   const live = reserveRun({ staffId: id, kind: 'chat', turnId });
+  // A chat reply never goes through `slot`, so it tells the floor itself.
+  show();
   const started = Date.now();
   // A retry carries what the owner added to the turn with Send now, too.
   const message = log
@@ -249,6 +254,7 @@ export async function replyToOwnerTurn(
     }
     // The bug report this run drafted, taken whatever the outcome: only a reply carries it.
     const bug = takeBugDraft(id, live.key);
+    const update = takeUpdateRequest(id, live.key);
     const at = new Date();
     const common = {
       at: at.toISOString(),
@@ -270,9 +276,14 @@ export async function replyToOwnerTurn(
       onEvent({ type: 'done', text });
     } else if (r.ok) {
       const { text, choices } = splitChoices(r.text);
-      const kept = { ...(choices.length ? { choices } : {}), ...(bug ? { bug } : {}) };
+      const kept = {
+        ...(choices.length ? { choices } : {}),
+        ...(bug ? { bug } : {}),
+        ...(update ? { updates: true as const } : {})
+      };
       addToChat(id, { ...common, text, ...kept });
       onEvent({ type: 'done', text, ...kept });
+      if (update?.check && MANAGED) askShellToCheck();
     } else {
       const signIn = usedTool
         ? undefined
@@ -289,6 +300,7 @@ export async function replyToOwnerTurn(
   } finally {
     releaseRun(live);
     bus.emit('run-ended');
+    show();
     emit({ type: 'change', table: 'chat' });
   }
 }

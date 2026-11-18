@@ -19,6 +19,8 @@ import {
   accessOf,
   askAboveLevel,
   capped,
+  handedOver,
+  handOffsLine,
   levelLine,
   NETWORK_HELD_LINE,
   outsideLines,
@@ -29,6 +31,7 @@ import type { ConnectorRow, GrantRow } from '../src/office.ts';
 
 /** A Claude Code Odd on a Mac with both switches off and no folder. */
 const noOwnTools = {
+  actsOnHandOffs: false,
   agent: 'claude',
   own: {
     commands: false,
@@ -37,7 +40,7 @@ const noOwnTools = {
     network: false,
     granted: []
   }
-} as const satisfies Pick<Capabilities, 'agent' | 'own'>;
+} as const satisfies Pick<Capabilities, 'actsOnHandOffs' | 'agent' | 'own'>;
 
 function grant(
   level: Level,
@@ -92,7 +95,7 @@ test('each held-back reason tells the Odd what brings the tool back', () => {
   const atRead = (a: ReturnType<typeof accessOf>) => ({ ...caps(a), level: 'read' as const });
   assert.equal(
     outsideLines(atRead(accessOf(grant('act'), 'read')), 'Sam')[0],
-    'Notion (read and write): held back. It needs the Draft level or higher, and the current level is Read. It works again once Sam raises it. Sam sets your level on your Settings tab, under Model.'
+    'Notion (read and write): held back. It needs the Draft level or higher, and the current level is Read. It works again once Sam raises it. When a job needs a higher level, ask Sam for it with ask_for_level.'
   );
   // office_report reads it about a colleague, so the card is that Odd's.
   assert.equal(
@@ -141,11 +144,11 @@ test('the switches are placed on whose Settings tab, under the section the card 
   assert.ok(officeSection('your').endsWith(`, under ${OFFICE_SECTION}`));
 });
 
-test("ask_for_access's refusal above the level says where the owner sets it and asks for no raise", () => {
+test("ask_for_access's refusal above the level tells the Odd to ask for the level with ask_for_level, then ask again", () => {
   const said = askAboveLevel('read', 'write', 'Sam');
   assert.equal(
     said,
-    'You hold read, so you cannot ask for write. Sam sets your level on your Settings tab, under Model. If this job needs a higher one, say so in your reply.'
+    'You hold read, so you cannot ask for write. When a job needs a higher level, ask Sam for it with ask_for_level. Once you have it, ask for write again.'
   );
 });
 
@@ -211,10 +214,11 @@ test("my_access says a capped run's level and why, and an uncapped run's own lev
     draftOnly,
     [
       levelLine('draft', 'Sam'),
-      "This run was started by a colleague or by the office, not by Sam's yes, so it works at Draft at most.",
+      "This run serves a colleague's hand-off or was started by the office, so it works at Draft at most, whatever Sam has approved.",
+      handOffsLine(false, 'Sam'),
       'Your runs go through Claude Code.',
       'Your own tools work on files only. No shell: ask Sam to turn on Run commands with ask_for_switch. No web: ask Sam to turn on Browse the web with ask_for_switch.',
-      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, say which and why in your reply.',
+      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, ask for it with ask_for_office_tool.',
       'Sam has given you no folders. When a job needs a folder outside the office, ask with ask_for_folder.',
       `- (id: notion) Notion (read and write): every tool. Each call that changes something waits for Sam's yes: the office puts that exact call on their desk and makes it once they approve, then you carry on with what it returned. Call it once and move on; never call it again to retry, and never say it is done before you hear.`
     ].join('\n')
@@ -223,9 +227,10 @@ test("my_access says a capped run's level and why, and an uncapped run's own lev
     accessInRun(own, 'Sam', {}),
     [
       levelLine('act', 'Sam'),
+      handOffsLine(false, 'Sam'),
       'Your runs go through Claude Code.',
       'Your own tools work on files only. No shell: ask Sam to turn on Run commands with ask_for_switch. No web: ask Sam to turn on Browse the web with ask_for_switch.',
-      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, say which and why in your reply.',
+      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, ask for it with ask_for_office_tool.',
       'Sam has given you no folders. When a job needs a folder outside the office, ask with ask_for_folder.',
       '- (id: notion) Notion (read and write): every tool.'
     ].join('\n')
@@ -236,12 +241,56 @@ test("my_access says a capped run's level and why, and an uncapped run's own lev
   );
 });
 
+test("a standing yes holds in a run a colleague's words reach only when the owner lets the Odd act on its own on their work", () => {
+  const standing = { ...grant('act'), standing: ['stage'] };
+  const own = (acts: boolean): Capabilities => ({
+    level: 'draft',
+    remit: '',
+    office: [],
+    outside: [accessOf(standing, 'draft')],
+    ...noOwnTools,
+    actsOnHandOffs: acts
+  });
+  // Off: no standing yes in the hand-off's run, so each change waits. On: as anywhere else.
+  assert.deepEqual(handedOver(own(false)).outside[0].standing, []);
+  assert.deepEqual(handedOver(own(true)).outside[0].standing, ['stage']);
+  const said =
+    'Except stage: Sam lets you use that one without asking, so a call goes straight through.';
+  // my_access says the same, from the run's environment.
+  assert.ok(accessInRun(own(false), 'Sam', {}).includes(said));
+  assert.ok(!accessInRun(own(false), 'Sam', { FROM_COLLEAGUE: '1' }).includes(said));
+  assert.ok(accessInRun(own(true), 'Sam', { FROM_COLLEAGUE: '1' }).includes(said));
+});
+
+test('an Odd at Act is told what the owner chose for work another Odd hands it', () => {
+  const own = (acts: boolean): Capabilities => ({
+    level: 'act',
+    remit: '',
+    office: [],
+    outside: [],
+    ...noOwnTools,
+    actsOnHandOffs: acts
+  });
+  assert.ok(accessInRun(own(false), 'Sam', {}).includes(handOffsLine(false, 'Sam')));
+  assert.ok(accessInRun(own(true), 'Sam', {}).includes(handOffsLine(true, 'Sam')));
+  assert.match(handOffsLine(false, 'Sam'), /^Work another Odd hands you runs at Draft at most/);
+  assert.match(
+    handOffsLine(true, 'Sam'),
+    /^Sam lets you act on your own on work another Odd hands you/
+  );
+  // Below Act it says nothing: a hand-off cannot pass the Odd's level.
+  assert.ok(
+    !accessInRun({ ...own(true), level: 'draft' }, 'Sam', {}).includes(handOffsLine(true, 'Sam'))
+  );
+});
+
 test('my_access says the tool, what its own tools reach and each folder, and a held network', () => {
   const own: Capabilities = {
     level: 'draft',
     remit: '',
     office: [],
     outside: [],
+    actsOnHandOffs: false,
     agent: 'claude',
     own: {
       commands: true,
@@ -260,7 +309,7 @@ test('my_access says the tool, what its own tools reach and each folder, and a h
     levelLine('draft', 'Sam'),
     'Your runs go through Claude Code.',
     `Your own tools work on files, plus ${shell}, which can reach the internet, and web search and fetch.`,
-    'Sam grants other office tools in your Settings tab, under Office; when a job needs one, say which and why in your reply.',
+    'Sam grants other office tools in your Settings tab, under Office; when a job needs one, ask for it with ask_for_office_tool.',
     'Folders Sam gave you:',
     '- /Users/Shared/p (read only)',
     '- /Users/Shared/q (read and change)',

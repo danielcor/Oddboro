@@ -470,75 +470,17 @@ test('a failure the office has no words for gets the fixed sentence and none of 
   );
 });
 
-/**
- * Ollama taking each embedding and never answering until `done()`, as one that
- * has stuck does. `record` asks as a line starts, so `asked` counts the lines
- * begun while none can land.
- */
-function stuckOllama() {
-  const asked: string[] = [];
-  let answer = () => {};
-  const answered = new Promise<void>((done) => (answer = done));
-  const real = globalThis.fetch;
-  const fetched = mock.method(globalThis, 'fetch', (async (url, init) => {
-    if (!String(url).endsWith('/api/embed')) return real(url, init);
-    asked.push(String(init?.body));
-    await answered;
-    return new Response('', { status: 500 });
-  }) as typeof fetch);
-  return {
-    asked,
-    answer,
-    done: () => {
-      answer();
-      fetched.mock.restore();
-    }
-  };
-}
-
-/** `p`, or a failure once it has waited longer than any error should. */
-const atOnce = <T>(p: Promise<T>): Promise<T> =>
-  Promise.race([
-    p,
-    delay(20_000, undefined, { ref: false }).then(() => {
-      throw new Error('the run was still waiting after 20 s');
-    })
-  ]);
-
-test("a stuck Ollama never holds back the run's error, and the line lands once it answers", async () => {
-  const { id, lines, landed } = await broken(missingProgram, 'stdio');
-  const ollama = stuckOllama();
-  try {
-    await inRun(id, (client) => atOnce(assert.rejects(client.listTools(), /ENOENT/)));
-    assert.equal(ollama.asked.length, 1, 'the line has started');
-    assert.deepEqual(await lines(), [], 'and cannot land yet');
-    ollama.answer();
-    assert.equal((await landed(1)).length, 1);
-  } finally {
-    ollama.done();
-  }
-});
-
-test('six listings at once, and one after, begin one line while Ollama is stuck', async () => {
+test('six listings at once, and one after, write one line', async () => {
   const { id, landed } = await broken(missingProgram, 'stdio');
-  const ollama = stuckOllama();
-  try {
-    await inRun(id, async (client) => {
-      const six = await atOnce(
-        Promise.allSettled(Array.from({ length: 6 }, () => client.listTools()))
-      );
-      assert.deepEqual(
-        six.map((r) => r.status),
-        Array(6).fill('rejected')
-      );
-      await atOnce(assert.rejects(client.listTools(), /ENOENT/));
-    });
-    assert.equal(ollama.asked.length, 1);
-    ollama.answer();
-    assert.equal((await landed(1)).length, 1);
-  } finally {
-    ollama.done();
-  }
+  await inRun(id, async (client) => {
+    const six = await Promise.allSettled(Array.from({ length: 6 }, () => client.listTools()));
+    assert.deepEqual(
+      six.map((r) => r.status),
+      Array(6).fill('rejected')
+    );
+    await assert.rejects(client.listTools(), /ENOENT/);
+  });
+  assert.equal((await landed(1)).length, 1);
 });
 
 test("a line that cannot be written is logged and never left unhandled, and the run still gets the connector's own error", async () => {

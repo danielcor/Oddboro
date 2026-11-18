@@ -45,8 +45,9 @@ export async function recorder(): Promise<{ port: number; got: Got[]; close: () 
 
 /**
  * A temp home and settings file, set in the environment before the office's
- * modules load. The database port is one nothing listens on, so a test that
- * queries must start its own; none ever reaches the owner's office.
+ * modules load. The database is one nothing listens on (a socket in the temp
+ * home, or port 9 on Windows), so a test that queries must start its own; none
+ * ever reaches the owner's office.
  */
 export function tempOffice(prefix: string): { folder: string; settings: string } {
   const folder = mkdtempSync(join(tmpdir(), `oddboro-${prefix}-`));
@@ -56,9 +57,7 @@ export function tempOffice(prefix: string): { folder: string; settings: string }
     ODDBORO_HOME: folder,
     ODDBORO_ENV: settings,
     ODDBORO_DB_PORT: '9',
-    DATABASE_URL: 'postgres://postgres:postgres@127.0.0.1:9/postgres',
-    ODDBORO_LOCAL_DB: '1',
-    OLLAMA_URL: 'http://127.0.0.1:9'
+    ODDBORO_LOCAL_DB: '1'
   });
   delete process.env.OFFICE_DIAGNOSTICS;
   delete process.env.ODDBORO_DIAGNOSTICS_DSN;

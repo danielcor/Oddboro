@@ -67,9 +67,7 @@ Object.assign(process.env, {
   ODDBORO_DB_PORT: String(port),
   ODDBORO_ENV: settings,
   ODDBORO_PORT: '4517',
-  DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,
   ODDBORO_LOCAL_DB: '1',
-  OLLAMA_URL: 'http://127.0.0.1:9',
   ODDBORO_ACCOUNT_SITE: `${fake.origin}/`
 });
 const { startLocalDatabase } = await import('@oddboro/ledger/local-db');

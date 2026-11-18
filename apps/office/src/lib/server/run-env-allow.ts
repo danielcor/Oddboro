@@ -141,7 +141,7 @@ function allowedEnv(extra: Names): Record<string, string> {
 /**
  * Every variable the office's tool server (`mcp.ts` in the ledger, and what
  * it imports) reads as it starts, besides those its entry sets for the run:
- * where the office lives, its ports and database, Ollama, the office's own
+ * where the office lives (which holds the search model), its ports and database, the office's own
  * settings from .env, the folders the system names, and the certificates the
  * owner added, since the server reaches the MCP Registry and Google over
  * HTTPS (`NODE_CERTIFICATES`). The office passes
@@ -157,7 +157,6 @@ export const TOOL_SERVER_ENV = [
   'ODDBORO_APP',
   'ODDBORO_ENV',
   'ODDBORO_LOCAL_DB',
-  'OLLAMA_URL',
   'OFFICE_TIME_ZONE',
   'OFFICE_AGENT',
   'XDG_STATE_HOME',

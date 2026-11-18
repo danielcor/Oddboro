@@ -1,0 +1,1 @@
+ALTER TABLE "owner" ADD COLUMN "act_check_at" timestamp with time zone;

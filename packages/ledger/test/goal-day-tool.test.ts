@@ -1,6 +1,6 @@
 // The dates an Odd reads in my_goals are the office's days, as a run sees them:
 // the office tool server (src/mcp.ts) in a process of its own, over the office's
-// own database in a throwaway folder on a free port. Run with
+// own database in a throwaway folder. Run with
 // `npm test -w @oddboro/ledger`.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';

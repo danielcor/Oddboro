@@ -6,7 +6,7 @@
 // task, and hand_off when it would open a thread; that comment says why the
 // rest are outside) is refused in its chat and pointed to tell_lead. An Odd
 // with a job of its own is told the rule and trusted with it. Opening a
-// thread has its own check where it happens (`openThread`).
+// thread has its own check where it happens (`assertMayLead`).
 import { and, eq, isNotNull, ne } from 'drizzle-orm';
 import { db } from './db.ts';
 import { jobs, threads } from './schema.ts';

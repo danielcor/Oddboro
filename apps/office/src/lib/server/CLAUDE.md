@@ -51,6 +51,14 @@ then names every other place.
   The type check fails until the row is there and `failed-run.test.ts` has a
   way to make that kind fail; the test then checks the error shows in
   exactly those places.
+- To change what Odds are told (`house.ts`, a run's brief, or the lines in
+  the ledger's `capabilities.ts`), change the words, then run
+  `npm run prompts:accept -w @oddboro/office` and commit the changed
+  `prompts.test.ts.snapshot` with them. `prompts.test.ts` holds the prompt of
+  each kind of run an Odd makes and fails until its snapshot matches, so
+  review reads the change line by line. A new follow-up kind fails its type
+  check until it has a case there. Add a new case at the end of the file, so
+  the ids in the cases before it stay put.
 
 ## Live runs
 
@@ -66,15 +74,7 @@ jobs; it never owns a second process registry.
 Each line says what to do when its trigger comes.
 
 - Building NEW-1651 or NEW-1654, whichever comes first: give each run one
-  row of its own, with `runs.jobId` optional, usage pointing at the run, and
-  one reader per tool of that tool's stream.
-- Building NEW-1657 (Claude Code's commands on Linux): first make one run
-  plan every tool's launch reads, and move Claude Code's launch out of
-  `staff.ts` into a file of its own beside `codex.ts`, `grok.ts` and
-  `gemini.ts`.
-- Before any change to what Odds are told (`house.ts`, a run's brief, or the
-  lines in the ledger's `capabilities.ts`): add snapshot tests of each kind of
-  run's prompt, so the change shows as a diff in review.
+  row of its own, with `runs.jobId` optional and usage pointing at the run.
 - When a feature changes `staff.ts` substantially (it adds to or rewrites a
   group of functions, not a line or two): first move the piece it touches into
   a module of its own, then make the change there. Do not split the file in

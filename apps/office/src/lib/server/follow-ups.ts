@@ -1,8 +1,8 @@
 // Work a staffer owes once the owner answers it: carry out an approved ask, rework
-// one the owner sent back, take in the reason for a no, act on their feedback on a report, pick up the work
-// that waited on a task the owner just finished, plan a goal they set, get a
-// new hire with a job started on its first day, or read the owner's
-// edit to an Odd's file for a lesson. Work one Odd hands another runs the
+// one the owner sent back, take in the reason for a no, act on the owner's answer
+// to something it raised, pick up the work that waited on a task the owner just
+// finished, plan a goal they set, get a new hire with a job started on its first
+// day, or read the owner's edit to an Odd's file for a lesson. Work one Odd hands another runs the
 // same way, and so does its result going back (hand-offs.ts in the ledger), and
 // so does a thread's hub picking it back up (threads.ts).
 // This listens for changes to follow-ups and starts any nobody has started yet. Nothing polls:
@@ -32,14 +32,14 @@ const g = globalThis as unknown as { followUps?: boolean };
 async function look(): Promise<void> {
   // An update is about to install. Nothing new starts; the next start looks again.
   if (held()) return;
-  for (const { id, ask, report, task, goal } of await followUpsToDo()) {
+  for (const { id, ask, task, goal } of await followUpsToDo()) {
     // The claim is in the database, so two looks never start the same one. It
     // returns the row as claimed, with any answer that joined it since the list.
     const f = await startFollowUp(id);
     if (!f) continue;
     // The same name a restart gives it, so one piece of work has one name.
     const about = await workTitle(f);
-    void followThrough(f, ask, report, task, goal)
+    void followThrough(f, ask, task, goal)
       .then(async (r) => {
         await endFollowUp(f, about, r.outcome, r.text, r.joined);
         // A save while an edited run ran joined it, so once it ends, any change

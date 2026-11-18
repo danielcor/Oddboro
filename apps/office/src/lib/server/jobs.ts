@@ -1,10 +1,13 @@
-// The office clock. It keeps one timer, set for the soonest due job, poke or
-// parked thread, and resets it whenever the jobs, pokes or threads table
-// changes. A thread's hub parks it until a time (resume_at); the clock starts
-// the hub's pick-up then. Every job run is told the scheduled time it is for
-// (job-brief.ts). A job on time runs at once. One whose time passed while the
-// Mac slept is settled by its kind (`dueNow` in the ledger's missed-runs.ts):
-// a `latest` job catches up once if less than half a period passed since its
+// The office clock. It keeps one timer, set for the soonest due job, poke,
+// parked thread or window ask, and resets it whenever the jobs, pokes or
+// threads table changes. A thread's hub parks it until a time (resume_at); the
+// clock starts the hub's pick-up then. The usage window's ask leaves the desk
+// at the window's reset if nobody answered it; it is raised with the hold it
+// puts on a thread, so the threads table's change sets the timer for it.
+// Every job run is told the scheduled time it is for (job-brief.ts). A job
+// on time runs at once. One whose time passed while the Mac slept is settled
+// by its kind (`dueNow` in the ledger's missed-runs.ts): a `latest` job
+// catches up once if less than half a period passed since its
 // newest missed time, else skips to its next time and waits on the desk's
 // While you were away card; a `record` job owes a run for every missed
 // period, or, past FILL_WITHOUT_ASKING of them, asks the owner first. Owed
@@ -41,6 +44,9 @@ import {
   takeOwed,
   waitingPokes,
   wakeThread,
+  WINDOW_ASK_LAPSED,
+  windowAsksDue,
+  withdrawAsk,
   type JobRow,
   type RunTrigger
 } from '@oddboro/ledger';
@@ -88,6 +94,14 @@ async function plan(): Promise<void> {
           console.error(`Thread ${t.id} did not wake:`, e)
         );
       else soonest = Math.min(soonest, t.resumeAt.getTime());
+    }
+    for (const a of await windowAsksDue()) {
+      // A failed withdrawal leaves the ask open, so the clock's next look tries again.
+      if (a.at <= now)
+        void withdrawAsk(a.id, WINDOW_ASK_LAPSED).catch((e: unknown) =>
+          console.error(`The window ask ${a.id} did not leave the desk:`, e)
+        );
+      else soonest = Math.min(soonest, a.at.getTime());
     }
   } catch (e) {
     // Unhandled, the rejection would end the office, or leave no timer set so

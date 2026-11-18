@@ -79,6 +79,10 @@ mock.module('node:child_process', {
     }
   }
 });
+// Under test the store refuses until a test stands one in. This file tests
+// the Keychain store itself, with `security` stubbed above, so it asks for
+// this system's store before secrets.ts picks one as it loads.
+process.env.ODDBORO_SECRETS = 'system';
 const {
   getSecret,
   setSecret,
@@ -136,6 +140,16 @@ test('without ODDBORO_SECRETS the office keeps using security and writes nothing
   await settle();
   assert.deepEqual(sent, []);
 });
+
+test(
+  'the store kept is the stubbed security, not the one that refuses under test',
+  // Elsewhere this system's store is secret-tool or the Credential Manager, which nothing here stubs.
+  { skip: process.platform !== 'darwin' && 'security is the store on a Mac only' },
+  () => {
+    assert.deepEqual(secretStore(), { ok: true });
+    assert.deepEqual(commandLines.at(-1), ['default-keychain']);
+  }
+);
 
 test('the first start loads the shell Keychain and moves the old items across, then deletes them', async () => {
   shellKeychain.set('github:token', 'ghp_new');

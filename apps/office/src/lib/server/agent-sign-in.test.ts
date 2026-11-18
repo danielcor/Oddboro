@@ -23,7 +23,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import {
   L,
   OFFICE_GEMINI_KEY,
@@ -48,6 +48,13 @@ import type { AgentTool, LaterTool } from '../../routes/api/agents/+server.ts';
 const route = await import('../../routes/api/agents/[tool]/+server.ts');
 const claudeRoute = await import('../../routes/api/setup/claude/+server.ts');
 const { geminiKeyMissing, clearGeminiKey, setGeminiKey } = await import('./gemini.ts');
+const { SLOTS } = await import('./agent-sign-in.ts');
+
+// A test that fails or runs out of time leaves its install or sign-in running,
+// and every test after it would find that tool still busy.
+afterEach(() => {
+  for (const slot of Object.values(SLOTS)) slot.stop('The test ended.');
+});
 
 const GROK_HOME = join(folder, 'accounts', 'grok', 'office');
 const CODEX_HOME = join(folder, 'accounts', 'codex', 'office');
@@ -85,9 +92,12 @@ const pickOffice = (office: unknown, platform: NodeJS.Platform = 'darwin') =>
   );
 const stateOf = async (id: string) => (await listed()).find((t) => t.id === id)?.signIn;
 
-/** `check` once it gives a value, within 4 s. */
+/**
+ * `check` once it gives a value, within 30 s: a stand-in installer can take
+ * seconds to start on a busy machine, and a value ends the wait at once.
+ */
 async function waitFor<T>(check: () => T | undefined, what: string): Promise<T> {
-  const until = Date.now() + 4000;
+  const until = Date.now() + 30_000;
   for (;;) {
     const v = check();
     if (v !== undefined) return v;
@@ -166,8 +176,8 @@ const install = (tool: string) =>
 const installRuns = (): { args: string[]; env: string[] }[] =>
   existsSync(installs)
     ? readFileSync(installs, 'utf8')
-        .trim()
         .split('\n')
+        .slice(0, -1) // The child may still be writing the last line.
         .map((l) => JSON.parse(l) as { args: string[]; env: string[] })
     : [];
 /** Every installer the page ran so far, by its name and arguments. */

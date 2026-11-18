@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { eq, max } from 'drizzle-orm';
+import { eq, max, sql } from 'drizzle-orm';
 import {
   ASK_KINDS,
   asks,
@@ -19,6 +19,7 @@ import {
   grants,
   jobs,
   ledger,
+  owner,
   staff,
   staffGoals,
   tasks,
@@ -29,7 +30,9 @@ import {
 import { db } from './pglite.ts';
 import { TEMP_IN_APPDATA } from './store-states.ts';
 
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
+// The owner passed the Act check (act-check.test.ts), so a level ask's yes to
+// Act goes through. No name, so the owner is still "the owner".
+await db.insert(owner).values({ name: '', actCheckAt: new Date() });
 // A home of the test's own, so a folder ask's folder can be given.
 const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'desk-answers-')));
 process.env.HOME = HOME;
@@ -47,6 +50,8 @@ const {
   hire,
   officeActivity,
   raiseAsk,
+  task,
+  TaskResponseConflict,
   tickStep
 } = await import('../src/office.ts');
 const { ownerAnswers } = await import('../src/desk-answers.ts');
@@ -106,24 +111,41 @@ async function held(): Promise<Map<string, string>> {
     ...served.map((s) => [`${s.staffId} goal ${s.goalId}`, `serves:${s.staffId}`] as const)
   ]);
 }
-type Mark = { followUp: number; held: Map<string, string> };
+type Mark = { followUp: number; notes: Map<number, string | null>; held: Map<string, string> };
 async function markNow(): Promise<Mark> {
   const [last] = await db.select({ id: max(followUps.id) }).from(followUps);
-  return { followUp: last?.id ?? 0, held: await held() };
+  const notes = await db.select({ id: followUps.id, note: followUps.note }).from(followUps);
+  return {
+    followUp: last?.id ?? 0,
+    notes: new Map(notes.map((f) => [f.id, f.note])),
+    held: await held()
+  };
 }
 /**
- * What reached an Odd since `mark`: each new follow-up as `<kind>:<odd>`, each
+ * The follow-ups an answer reached since `mark`: each new one, and each one
+ * waiting since before that an answer joined as a line (`offWorkAnswer`).
+ */
+async function since(mark: Mark) {
+  const ups = await db.select().from(followUps).orderBy(followUps.id);
+  return ups.filter((f) => f.id > mark.followUp || f.note !== mark.notes.get(f.id));
+}
+/**
+ * What reached an Odd since `mark`: each follow-up new or joined as `<kind>:<odd>`, each
  * new grant as `grant:<odd>`, each tool it newly uses without asking as
  * `standing:<odd>`, and each Odd newly serving a goal as `serves:<odd>`.
  */
 async function reached(mark: Mark): Promise<string[]> {
-  const ups = await db.select().from(followUps);
+  const ups = await since(mark);
   const now = await held();
   return [
-    ...ups.filter((f) => f.id > mark.followUp).map((f) => `${f.kind}:${f.staffId}`),
+    ...ups.map((f) => `${f.kind}:${f.staffId}`),
     ...[...now].filter(([key]) => !mark.held.has(key)).map(([, shown]) => shown)
   ].sort();
 }
+
+/** Ada's `answered` runs an answer reached since `mark`. */
+const heard = async (mark: Mark) =>
+  (await since(mark)).filter((f) => f.staffId === 'ada' && f.kind === 'answered');
 
 /** The effects a cell names, as the office reads them. */
 const effectsOf = (cell: AskAnswer[Decision]): readonly Effect[] =>
@@ -139,9 +161,9 @@ const cellOf = (kind: AskKind, decision: Decision) =>
  * ask changes nothing an Odd sees on a no, so only its cell can hold it.
  */
 type Pin = { cell: AskAnswer[Decision]; onThread: string[]; onNone?: string[] };
-const OFF_A_THREAD = { none: 'NEW-1715' };
+// A no with a reason on no work: the denied run carries the answer, so no answered run goes too.
 const NO: Pin = {
-  cell: ['answer_back', 'denied_lesson', OFF_A_THREAD],
+  cell: ['answer_back', 'denied_lesson'],
   onThread: ['denied:ada', 'resume:ada'],
   onNone: ['denied:ada']
 };
@@ -165,9 +187,9 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
   },
   hire: {
     approve: {
-      cell: { by: 'Approve a hire by hiring', then: ['answer_back', OFF_A_THREAD] },
+      cell: { by: 'Approve a hire by hiring', then: ['answer_back'] },
       onThread: ['resume:ada'],
-      onNone: []
+      onNone: ['answered:ada']
     },
     deny: NO,
     iterate: REWORK
@@ -176,10 +198,10 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
     approve: {
       cell: {
         by: 'Send the reply, or save it to Gmail drafts',
-        then: ['answer_back', OFF_A_THREAD]
+        then: ['answer_back']
       },
       onThread: ['resume:ada'],
-      onNone: []
+      onNone: ['answered:ada']
     },
     deny: NO,
     iterate: REWORK
@@ -188,10 +210,10 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
     approve: {
       cell: {
         by: 'Create the filter from its card on the desk',
-        then: ['answer_back', OFF_A_THREAD]
+        then: ['answer_back']
       },
       onThread: ['resume:ada'],
-      onNone: []
+      onNone: ['answered:ada']
     },
     deny: NO,
     iterate: REWORK
@@ -212,6 +234,18 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
     deny: NO,
     iterate: REWORK
   },
+  // The level went to Ada with the yes, so the work that waited on it starts.
+  level: {
+    approve: { cell: ['grant_setting'], onThread: ['carry_out:ada'], onNone: ['carry_out:ada'] },
+    deny: NO,
+    iterate: REWORK
+  },
+  // The office tools went to Ada with the yes, so the work that waited on them starts.
+  office_tool: {
+    approve: { cell: ['grant_setting'], onThread: ['carry_out:ada'], onNone: ['carry_out:ada'] },
+    deny: NO,
+    iterate: REWORK
+  },
   // The office made the call with the yes, so the Odd carries on with what it returned.
   call: {
     approve: {
@@ -224,7 +258,7 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
   },
   goal: {
     approve: {
-      cell: ['approval_work', 'answer_back', OFF_A_THREAD],
+      cell: ['approval_work', 'answer_back'],
       onThread: ['goal:max', 'resume:ada'],
       onNone: ['goal:max']
     },
@@ -250,18 +284,18 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
   // Ada asks about another Odd, so the one that leaves or comes back is never Ada.
   remove: {
     approve: {
-      cell: ['answer_back', OFF_A_THREAD, 'odd_leaves'],
+      cell: ['answer_back', 'odd_leaves'],
       onThread: ['resume:ada'],
-      onNone: []
+      onNone: ['answered:ada']
     },
     deny: NO,
     iterate: REFUSED
   },
   bring_back: {
     approve: {
-      cell: ['answer_back', OFF_A_THREAD, 'odd_returns'],
+      cell: ['answer_back', 'odd_returns'],
       onThread: ['resume:ada'],
-      onNone: []
+      onNone: ['answered:ada']
     },
     deny: NO,
     iterate: REFUSED
@@ -277,7 +311,7 @@ const PINNED: Record<AskKind, Record<Decision, Pin>> = {
     approve: {
       cell: ['give_standing', 'answer_back'],
       onThread: ['resume:ada', 'standing:ada'],
-      onNone: ['standing:ada']
+      onNone: ['answered:ada', 'standing:ada']
     },
     deny: NO,
     iterate: REFUSED
@@ -377,7 +411,11 @@ const raise: Record<AskKind, (onThread: boolean) => Promise<Raised>> = {
       .values({ staffId: 'max', kind: 'window', title: 'Keep going?', why: 'w', ifApproved: 'i' })
       .returning({ id: asks.id });
     const id = await thread();
-    await db.update(threads).set({ heldBy: a.id }).where(eq(threads.id, id));
+    // Held until the window resets, as the office holds it: a hold always has its reset time.
+    await db
+      .update(threads)
+      .set({ heldBy: a.id, resumeAt: new Date(Date.now() + 3_600_000) })
+      .where(eq(threads.id, id));
     return { id: a.id };
   },
   // A yes turns the switch on, so each ask starts with it off.
@@ -390,6 +428,34 @@ const raise: Record<AskKind, (onThread: boolean) => Promise<Raised>> = {
       why: 'w',
       ifApproved: 'i',
       switches: ['web'],
+      threadId
+    });
+    return { id: ask.id };
+  },
+  // A yes raises Ada, so each ask starts with her at Draft.
+  level: async (on) => {
+    const threadId = on ? await thread() : undefined;
+    await db.update(staff).set({ permission: 'draft' }).where(eq(staff.id, 'ada'));
+    const { ask } = await raiseAsk('ada', {
+      kind: 'level',
+      title: 'Raise Ada from Draft to Act',
+      why: 'w',
+      ifApproved: 'i',
+      level: 'act',
+      threadId
+    });
+    return { id: ask.id };
+  },
+  // A yes turns the tool on, so each ask starts with Ada holding none.
+  office_tool: async (on) => {
+    const threadId = on ? await thread() : undefined;
+    await db.update(staff).set({ tools: [] }).where(eq(staff.id, 'ada'));
+    const { ask } = await raiseAsk('ada', {
+      kind: 'office_tool',
+      title: 'Turn on Office report',
+      why: 'w',
+      ifApproved: 'i',
+      officeTools: ['office_report'],
       threadId
     });
     return { id: ask.id };
@@ -589,12 +655,14 @@ test("every ask kind's yes, no and send-back has the row pinned here, and reache
     }
 });
 
-/** Each answer that tells the Odd nothing when its ask was raised on no thread. */
-const SILENT_OFF_A_THREAD: readonly (readonly [AskKind, Decision])[] = [
-  ['hire', 'approve'],
-  ['goal', 'approve'],
+/**
+ * Each answer that starts no run of its own when given with no reason. On an
+ * ask raised on no thread, the answer itself is the only word the Odd gets.
+ */
+const NO_RUN_OF_ITS_OWN: readonly (readonly [AskKind, Decision])[] = [
   ['reply', 'approve'],
   ['filter', 'approve'],
+  ['hire', 'approve'],
   ['approval', 'deny'],
   ['access', 'deny'],
   ['hire', 'deny'],
@@ -603,6 +671,8 @@ const SILENT_OFF_A_THREAD: readonly (readonly [AskKind, Decision])[] = [
   ['filter', 'deny'],
   ['folder', 'deny'],
   ['switch', 'deny'],
+  ['level', 'deny'],
+  ['office_tool', 'deny'],
   ['call', 'deny'],
   ['remove', 'approve'],
   ['remove', 'deny'],
@@ -610,22 +680,204 @@ const SILENT_OFF_A_THREAD: readonly (readonly [AskKind, Decision])[] = [
   ['bring_back', 'deny'],
   ['standing', 'deny']
 ];
-const namesNew1715 = (kind: AskKind, decision: Decision) =>
-  effectsOf(cellOf(kind, decision)).some((e) => typeof e === 'object' && e.none === 'NEW-1715');
 
-test('a yes to a hire, a goal, a reply, a filter, letting an Odd go or bringing one back, or a no with no reason, to an ask raised on no thread tells the Odd nothing, and only those rows name NEW-1715', async () => {
-  for (const [kind, decision] of SILENT_OFF_A_THREAD) {
+test('an answer with no run of its own, a no with no reason among them, to an ask raised on no thread wakes the Odd that raised it once with the answer, and no row is left to name NEW-1715', async () => {
+  for (const [kind, decision] of NO_RUN_OF_ITS_OWN) {
     const where = `${kind} ${decision}`;
     const { id } = await raise[kind](false);
     const mark = await markNow();
     await answer(kind, decision, id, null);
     const toAda = (await reached(mark)).filter((r) => r.endsWith(':ada'));
-    assert.deepEqual(toAda, [], where);
+    assert.deepEqual(toAda, ['answered:ada'], where);
+    const [woke] = await heard(mark);
+    const title = (await askRow(id))?.title ?? '';
+    assert.ok(woke?.note?.includes(`"${title}"`), `${where}: ${woke?.note}`);
   }
   const naming = ASK_KINDS.flatMap((kind) =>
-    DECISIONS.filter((d) => namesNew1715(kind, d)).map((d) => `${kind} ${d}`)
+    DECISIONS.filter((d) =>
+      effectsOf(cellOf(kind, d)).some((e) => typeof e === 'object' && e.none === 'NEW-1715')
+    ).map((d) => `${kind} ${d}`)
   );
-  assert.deepEqual(naming.sort(), SILENT_OFF_A_THREAD.map(([k, d]) => `${k} ${d}`).sort());
+  assert.deepEqual(naming, []);
+});
+
+test("a yes to a hire raised on no work wakes the Odd that proposed it, once, with the owner's note", async () => {
+  const { id } = await raise.hire(false);
+  // As the hire route does when the owner hired a persona in place of the proposed Odd.
+  const bo = await hire({
+    name: 'Bo',
+    role: 'Baker',
+    variant: 'a',
+    portrait: 'a',
+    room: 'workspace',
+    permission: 'draft',
+    remit: 'Bakes.',
+    desk: 'You are Bo.'
+  });
+  const mark = await markNow();
+  await approveHire(id, bo.id, 'Bo came from the personas instead.');
+  assert.deepEqual(
+    (await reached(mark)).filter((r) => r.endsWith(':ada')),
+    ['answered:ada']
+  );
+  const [woke] = await heard(mark);
+  assert.ok(
+    woke?.note?.includes('approved "Hire a baker": Bo came from the personas instead.'),
+    `${woke?.note}`
+  );
+});
+
+test("a plan yes's hire asks, job changes and owner task commit with its answer, so one that fails leaves the plan open and wakes nobody", async () => {
+  const goalId = await aGoal('Sell flour');
+  // Two jobs of one name, as an Odd can have until the owner renames one, so changing it fails.
+  const weigh = {
+    staffId: 'ivy',
+    name: 'Weigh flour',
+    instructions: 'Weigh it.',
+    schedule: { every: 'day', at: '09:00' } as const
+  };
+  await db.insert(jobs).values([weigh, weigh]);
+  const { ask } = await raiseAsk('ada', {
+    title: 'Plan the flour sale',
+    why: 'w',
+    ifApproved: 'i',
+    kind: 'plan',
+    plan: {
+      goalId,
+      items: [
+        {
+          kind: 'hire',
+          hire: {
+            name: 'Bo',
+            role: 'Baker',
+            permission: 'draft',
+            remit: 'Bakes.',
+            jobDescriptionFile: 'baker.md'
+          },
+          part: 'Bakes the samples'
+        },
+        {
+          kind: 'assign',
+          staff: 'ivy',
+          part: 'Weighs it',
+          editJob: { name: weigh.name, instructions: 'Weigh it twice.' }
+        }
+      ],
+      ownerSteps: ['Buy the sacks']
+    }
+  });
+  const mark = await markNow();
+  await assert.rejects(approvePlan(ask.id, [0, 1], null), /Two jobs have that name/);
+  assert.equal((await askRow(ask.id))?.status, 'open');
+  assert.deepEqual(await reached(mark), []);
+  const hires = await db.select().from(asks).where(eq(asks.kind, 'hire'));
+  assert.deepEqual(
+    hires.filter((h) => h.hire?.goal?.id === goalId),
+    []
+  );
+});
+
+// The lead's run reads the plan's hire asks, so they are written in the yes's
+// transaction, before that run is queued. The other test fails the plan on a job
+// change, which the yes's transaction makes before any hire ask.
+test('a plan yes whose hire ask cannot be written leaves the plan open, writes no hire ask and queues no run for its lead', async () => {
+  const goalId = await aGoal('Sell rye');
+  const { ask } = await raiseAsk('ada', {
+    title: 'Plan the rye sale',
+    why: 'w',
+    ifApproved: 'i',
+    kind: 'plan',
+    plan: {
+      goalId,
+      items: [
+        {
+          kind: 'hire',
+          hire: {
+            name: 'Cy',
+            role: 'Baker',
+            permission: 'draft',
+            remit: 'Bakes.',
+            jobDescriptionFile: 'baker.md'
+          },
+          part: 'Bakes the loaves'
+        }
+      ]
+    }
+  });
+  await db.execute(
+    sql.raw(
+      `create function refuse_hire() returns trigger as $$ begin if new.kind = 'hire' then raise exception 'hire refused'; end if; return new; end $$ language plpgsql`
+    )
+  );
+  await db.execute(
+    sql.raw(
+      'create trigger refuse_hire before insert on asks for each row execute function refuse_hire()'
+    )
+  );
+  const mark = await markNow();
+  try {
+    await assert.rejects(approvePlan(ask.id, [0], null), /Failed query: insert into "asks"/);
+  } finally {
+    await db.execute(sql.raw('drop trigger refuse_hire on asks'));
+    await db.execute(sql.raw('drop function refuse_hire()'));
+  }
+  assert.equal((await askRow(ask.id))?.status, 'open');
+  assert.deepEqual(await reached(mark), []);
+  const hires = await db.select().from(asks).where(eq(asks.kind, 'hire'));
+  assert.deepEqual(
+    hires.filter((h) => h.hire?.goal?.id === goalId),
+    []
+  );
+});
+
+// A transition in its own transaction runs again when Postgres ends it to
+// break a deadlock. The plan's write keeps the hire asks it raised in memory,
+// so a second run must not hand back the first run's, which rolled back.
+test('a plan yes that Postgres ends once to break a deadlock gives back only the hire asks it wrote', async () => {
+  const goalId = await aGoal('Sell spelt');
+  const hire = (name: string) => ({
+    kind: 'hire' as const,
+    hire: {
+      name,
+      role: 'Baker',
+      permission: 'draft' as const,
+      remit: 'Bakes.',
+      jobDescriptionFile: 'baker.md'
+    },
+    part: 'Bakes the loaves'
+  });
+  const { ask } = await raiseAsk('ada', {
+    title: 'Plan the spelt sale',
+    why: 'w',
+    ifApproved: 'i',
+    kind: 'plan',
+    plan: { goalId, items: [hire('Dot'), hire('Eli')] }
+  });
+  // A sequence is not rolled back, so only the first run is ended.
+  const run = async (statements: string[]) => {
+    for (const statement of statements) await db.execute(sql.raw(statement));
+  };
+  await run([
+    'create sequence deadlock_once',
+    `create function deadlock_once() returns trigger as $$ begin if old.kind = 'plan' and new.status <> 'open' and nextval('deadlock_once') = 1 then raise exception 'deadlock detected' using errcode = 'deadlock_detected'; end if; return new; end $$ language plpgsql`,
+    'create trigger deadlock_once before update on asks for each row execute function deadlock_once()'
+  ]);
+  let given: number[];
+  try {
+    given = (await approvePlan(ask.id, [0, 1], null)).hires.map((h) => h.id);
+  } finally {
+    await run([
+      'drop trigger deadlock_once on asks',
+      'drop function deadlock_once()',
+      'drop sequence deadlock_once'
+    ]);
+  }
+  assert.equal((await askRow(ask.id))?.status, 'approved');
+  const written = (await db.select().from(asks).where(eq(asks.kind, 'hire')))
+    .filter((h) => h.hire?.goal?.id === goalId)
+    .map((h) => h.id);
+  assert.equal(written.length, 2);
+  assert.deepEqual(given, written);
 });
 
 test("a done or dropped task, a done task with no Odd, and a goal's pause, met or drop have the rows pinned here and reach the Odd as pinned, and a none names its Linear row", async () => {
@@ -635,7 +887,7 @@ test("a done or dropped task, a done task with no Odd, and a goal's pause, met o
       other: ['task_done', 'wake_parked'],
       noOdd: ['wake_parked']
     },
-    dropped: ['answer_back', 'wake_parked', { none: 'NEW-1703' }]
+    dropped: ['answer_back', 'wake_parked']
   });
   const steps: Step[] = [{ text: 'Do it', done: false }];
   // A connect task from Ada's access ask.
@@ -666,7 +918,7 @@ test("a done or dropped task, a done task with no Odd, and a goal's pause, met o
   await finishTask(nobodys.id, true, null);
   assert.deepEqual(await reached(mark), []);
 
-  // A dropped task goes back to the thread it was given on, and on none reaches nobody.
+  // A dropped task goes back to the thread it was given on, and on none wakes the Odd that gave it.
   for (const onThread of [true, false]) {
     const threadId = onThread ? await thread() : undefined;
     const t = await giveTask('ada', {
@@ -677,7 +929,7 @@ test("a done or dropped task, a done task with no Odd, and a goal's pause, met o
     });
     mark = await markNow();
     await finishTask(t.id, false, 'Not needed.');
-    const want = onThread ? ['resume:ada'] : [];
+    const want = onThread ? ['resume:ada'] : ['answered:ada'];
     assert.deepEqual(await reached(mark), want, onThread ? 'on a thread' : 'on none');
   }
 
@@ -693,6 +945,34 @@ test("a done or dropped task, a done task with no Odd, and a goal's pause, met o
       status
     );
   }
+});
+
+test('dropping a task given on no work wakes the Odd that gave it, once, with the drop and the note', async () => {
+  const t = await giveTask('ada', { title: 'Book the van', why: 'w', steps: ['Book it'] });
+  const mark = await markNow();
+  assert.equal(await finishTask(t.id, false, 'not now'), true);
+  assert.deepEqual(await reached(mark), ['answered:ada']);
+  const woke = await heard(mark);
+  assert.equal(woke.length, 1);
+  assert.equal(woke[0].kind, 'answered');
+  assert.match(woke[0].note ?? '', /dropped "Book the van": not now/);
+});
+
+// The office's task route shows the owner this error's words; a false would read
+// as "This task was already answered" and hide that the response is not saved.
+test('finishing a task whose response the owner has not saved rejects as a response conflict, and the task stays open', async () => {
+  const t = await giveTask('ada', {
+    title: 'Word the notice',
+    why: 'w',
+    steps: ['Read it'],
+    response: 'Draft'
+  });
+  await assert.rejects(finishTask(t.id, true, null, { responseVersion: 1 }), (e: unknown) => {
+    assert.ok(e instanceof TaskResponseConflict, String(e));
+    assert.equal(e.message, 'Review and save your response before marking this task done.');
+    return true;
+  });
+  assert.equal((await task(t.id))?.status, 'open');
 });
 
 test("only a choice step's answer counts as what the owner said", () => {

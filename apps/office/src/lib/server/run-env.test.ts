@@ -13,6 +13,8 @@ test('every run carries its key, so a thread it hands off on holds its pick-ups 
 
 test("only a run that reads the owner's no or edit for a lesson is told it hands nothing on", () => {
   assert.equal(officeEnv({ ...plain, lessonRun: true }).LESSON_RUN, '1');
+  assert.equal(officeEnv({ ...plain, fromColleague: true }).FROM_COLLEAGUE, '1');
+  assert.equal(officeEnv(plain).FROM_COLLEAGUE, undefined);
   assert.equal(officeEnv(plain).LESSON_RUN, undefined);
 });
 
@@ -67,5 +69,22 @@ test("a run below the Odd's level names its level, and the rest only when set", 
       THREAD_ID: '7',
       OFFICE_NETWORK_HELD: '1'
     }
+  );
+});
+
+test('only an owner chat gets the updater snapshot', () => {
+  const update = {
+    current: '0.0.10',
+    managed: true,
+    ready: false,
+    version: null,
+    installAt: null,
+    checking: false,
+    checked: null
+  };
+  assert.equal(officeEnv({ ...plain, update }).ODDBORO_UPDATE_STATUS, undefined);
+  assert.deepEqual(
+    JSON.parse(officeEnv({ ...plain, update, ownerSaid: 'Check updates' }).ODDBORO_UPDATE_STATUS),
+    update
   );
 });

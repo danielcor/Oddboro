@@ -159,10 +159,10 @@ test('a second filter for the same mail is refused naming the open one; revises 
       'Created a Gmail filter: mail from deals@store.example.com will skip the inbox and get the label "Deals", and tidied 40 emails'
     ]
   );
-  assert.equal(
-    (await sql`select 1 from follow_ups where ask_id = ${second}`).length,
-    0,
-    'no run carries a filter out'
+  assert.deepEqual(
+    [...(await sql`select kind from follow_ups where ask_id = ${second}`)],
+    [{ kind: 'answered' }],
+    'no run carries a filter out: the Odd, on no work, hears it was made, once'
   );
   const late = await c.callTool({ name: 'propose_filter', arguments: mail });
   assert.equal(late.isError, true, said(late));

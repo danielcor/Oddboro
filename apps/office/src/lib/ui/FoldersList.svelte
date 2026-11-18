@@ -1,8 +1,9 @@
 <script lang="ts">
   // The folders outside the office the owner gives an Odd, on the Folders tab
-  // of its Access: a line on what read and write mean, then each folder by its
-  // own name with where it sits, its toggle and Remove, then Add a folder (Add
-  // another folder once there is one), which opens the system's own picker
+  // of its Access: a line on what read and write mean, then each folder in
+  // path order, so one sits under any it is in, by its own name with where it
+  // sits, its toggle and Remove, then Add a folder (Add another folder once
+  // there is one), which opens the system's own picker
   // (`/api/folders/pick`) and says what it added. A path can be typed instead,
   // behind a link, or at once where no picker can open. A new folder starts at
   // Can read. A whole drive or system files comes back from the server as a
@@ -12,9 +13,11 @@
   // it. A level change or Remove sends the path as stored, so a folder gone
   // from the disk can still go. A folder given before its secret store was
   // listed reaches no run, so it says why here and can still be removed; the
-  // server works that out (`touchesStore`).
+  // server works that out (`touchesStore`). Every other folder has Use in chat,
+  // which opens the Odd's chat with the folder's path in the message box.
   import { FOLDER_LABEL, type FolderAccess } from '@oddboro/ledger/access';
   import { call } from './api.ts';
+  import { chatAbout } from './chat-about.svelte.ts';
   import FolderWarning from './FolderWarning.svelte';
   import type { StaffProfile } from '../staff/roster.ts';
 
@@ -24,8 +27,22 @@
     find?: string;
   };
   let { profile, find = '' }: Props = $props();
+  /**
+   * Paths in order part by part, so a folder sits right under any folder that
+   * holds it: `~/site/app` follows `~/site`, ahead of `~/site-old`.
+   */
+  const byPath = (a: string, b: string): number => {
+    const [x, y] = [a.split(/[\\/]/), b.split(/[\\/]/)];
+    for (let i = 0; i < Math.min(x.length, y.length); i++) {
+      const c = x[i].localeCompare(y[i]);
+      if (c) return c;
+    }
+    return x.length - y.length;
+  };
   const shown = $derived(
-    profile.folders.filter((f) => f.shown.toLowerCase().includes(find.trim().toLowerCase()))
+    profile.folders
+      .filter((f) => f.shown.toLowerCase().includes(find.trim().toLowerCase()))
+      .sort((a, b) => byPath(a.shown, b.shown))
   );
 
   /** The toggle's short words; each button's title carries the full level. */
@@ -150,6 +167,14 @@
             {#if f.touchesStore}
               <span class="block text-[11px] text-ember"
                 >Holds keys or sign-ins, so this Odd no longer gets it.</span
+              >
+            {:else}
+              <button
+                class="text-[11px] text-sea underline"
+                aria-label={`Use in chat: ${nameOf(f.shown)}`}
+                onclick={() =>
+                  chatAbout(profile.id, `Use the relevant files in this folder.\n${f.path}\n\n`)}
+                >Use in chat</button
               >
             {/if}
           </span>

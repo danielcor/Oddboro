@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     back,
     music,
     next,
     seek,
+    setFocus,
     setVolume,
     titleOf,
     toggleLove,
@@ -13,9 +15,11 @@
     toggleRepeat
   } from './music.svelte.ts';
 
-  // The bottom of the start panel. The music player on the start side: the
-  // track playing; love it, back, play, next, repeat it, pass on it; the seek
-  // bar, and the speaker, which opens the volume. Stacked on the end side, the
+  // The bottom of the start panel. The music player on the start side: its
+  // icon, which opens a menu to switch between the soundtrack and focus noise
+  // and shows which one is on, then the track playing; love it, back, play,
+  // next, repeat it, pass on it; the seek bar, and the speaker, which opens the
+  // volume. Focus noise uses only play, pause and the volume. Stacked on the end side, the
   // same width: the light on the
   // floor (Auto follows the office's clock, the sun and the moon hold it at
   // midday or at night, for the owner's eyes only), and under it the zoom: Fit
@@ -35,8 +39,65 @@
   const loved = $derived(!!music.current && music.loved.includes(music.current));
   const passed = $derived(!!music.current && music.passed.includes(music.current));
 
+  const time = $derived(music.focus ? 0 : music.time);
+  const duration = $derived(music.focus ? 0 : music.duration);
+
   const clock = (t: number) =>
     `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+
+  // The icon's menu: Soundtrack or Focus noise. It opens over the icon and
+  // closes on a pick, Escape, Tab, or a click anywhere else.
+  const SOURCES = [
+    { focus: false, label: 'Soundtrack' },
+    { focus: true, label: 'Focus noise' }
+  ];
+  let menuOpen = $state(false);
+  let menuBox = $state<HTMLElement>();
+  let menuButton = $state<HTMLButtonElement>();
+  let menu = $state<HTMLElement>();
+  const menuItems = () => [...(menu?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+
+  async function openMenu() {
+    menuOpen = true;
+    await tick();
+    menuItems()[music.focus ? 1 : 0]?.focus();
+  }
+  function closeMenu(focusButton = false) {
+    menuOpen = false;
+    if (focusButton) menuButton?.focus();
+  }
+  function pickSource(focus: boolean) {
+    setFocus(focus);
+    closeMenu(true);
+  }
+  /** The arrow keys open the menu from its button too. */
+  function buttonKey(e: KeyboardEvent) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    void openMenu();
+  }
+  /** Arrow keys move between the two, Enter or Space picks, Escape closes. */
+  function menuKey(e: KeyboardEvent) {
+    const items = menuItems();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') closeMenu(true);
+    else if (e.key === 'Tab') return closeMenu();
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      items[(at + step + items.length) % items.length]?.focus();
+    } else if (e.key === 'Home') items[0]?.focus();
+    else if (e.key === 'End') items.at(-1)?.focus();
+    else return;
+    e.preventDefault();
+  }
+  $effect(() => {
+    if (!menuOpen) return;
+    const away = (e: PointerEvent) => {
+      if (!menuBox?.contains(e.target as Node)) closeMenu();
+    };
+    window.addEventListener('pointerdown', away);
+    return () => window.removeEventListener('pointerdown', away);
+  });
 
   // The volume opens over the speaker and closes on a click anywhere else or Escape.
   let volOpen = $state(false);
@@ -61,6 +122,27 @@
   });
 </script>
 
+<!-- The soundtrack and focus noise, drawn as a pair: a note, and three soft waves. -->
+{#snippet note(cls: string)}
+  <svg viewBox="0 0 16 16" class={cls} aria-hidden="true">
+    <path d="M6 12V4.2l7-1.5v7.8" fill="none" stroke="currentColor" stroke-width="1.4" />
+    <circle cx="4.3" cy="12" r="1.9" fill="currentColor" />
+    <circle cx="11.3" cy="10.5" r="1.9" fill="currentColor" />
+  </svg>
+{/snippet}
+
+{#snippet waves(cls: string)}
+  <svg viewBox="0 0 16 16" class={cls} aria-hidden="true">
+    <path
+      d="M1.5 4q1.6-2.2 3.25 0t3.25 0 3.25 0 3.25 0M1.5 8q1.6-2.2 3.25 0t3.25 0 3.25 0 3.25 0M1.5 12q1.6-2.2 3.25 0t3.25 0 3.25 0 3.25 0"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+    />
+  </svg>
+{/snippet}
+
 {#snippet speaker()}
   <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
     <path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor" />
@@ -79,28 +161,99 @@
 
 <div class="flex items-center justify-between gap-3 text-xs">
   <div class="min-w-0 flex-1">
-    <div class="flex min-w-0 items-center gap-1.5" {title} aria-live="polite">
-      <svg viewBox="0 0 16 16" class="size-3.5 shrink-0 text-sea" aria-hidden="true">
-        <path d="M6 12V4.2l7-1.5v7.8" fill="none" stroke="currentColor" stroke-width="1.4" />
-        <circle cx="4.3" cy="12" r="1.9" fill="currentColor" />
-        <circle cx="11.3" cy="10.5" r="1.9" fill="currentColor" />
-      </svg>
-      {#if title}
-        <span class="truncate font-semibold text-ink"
-          ><span class="sr-only">Playing </span>{title}</span
+    <div class="flex min-w-0 items-center gap-1">
+      <div class="relative shrink-0" bind:this={menuBox}>
+        <button
+          bind:this={menuButton}
+          type="button"
+          class="source"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls="floor-audio-menu"
+          aria-label={`Office audio: ${music.focus ? 'Focus noise' : 'Soundtrack'}`}
+          title="Soundtrack or focus noise"
+          onclick={() => (menuOpen ? closeMenu() : openMenu())}
+          onkeydown={buttonKey}
         >
-      {:else}
-        <span class="truncate text-muted">Music</span>
-      {/if}
+          {#if music.focus}
+            {@render waves('size-3.5 text-sea')}
+          {:else}
+            {@render note('size-3.5 text-sea')}
+          {/if}
+          <svg viewBox="0 0 8 8" class="size-2" aria-hidden="true">
+            <path
+              d="M1.5 3l2.5 2.5L6.5 3"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        {#if menuOpen}
+          <div
+            bind:this={menu}
+            id="floor-audio-menu"
+            class="absolute start-0 bottom-full z-20 mb-1 flex min-w-36 flex-col rounded-lg border border-hairline bg-panel-solid py-1"
+            role="menu"
+            aria-label="Office audio"
+            tabindex="-1"
+            onkeydown={menuKey}
+          >
+            {#each SOURCES as src (src.label)}
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={music.focus === src.focus}
+                tabindex="-1"
+                class="flex items-center gap-2 px-3 py-1.5 text-start text-sm whitespace-nowrap text-ink outline-none hover:bg-sea/15 focus:bg-sea/15"
+                onclick={() => pickSource(src.focus)}
+              >
+                <svg viewBox="0 0 16 16" class="size-3 text-sea" aria-hidden="true">
+                  {#if music.focus === src.focus}
+                    <path
+                      d="M3 8.5l3 3 7-7"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  {/if}
+                </svg>
+                {#if src.focus}
+                  {@render waves('size-3.5 text-muted')}
+                {:else}
+                  {@render note('size-3.5 text-muted')}
+                {/if}
+                {src.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      <span class="min-w-0 truncate" {title} aria-live="polite">
+        {#if music.focus}
+          <span class="font-semibold text-ink">Focus noise</span>
+        {:else if title}
+          <!-- An expression keeps the space, which Svelte drops at the end of a text. -->
+          <span class="font-semibold text-ink"
+            ><span class="sr-only">{'Playing '}</span>{title}</span
+          >
+        {:else}
+          <span class="text-muted">Music</span>
+        {/if}
+      </span>
     </div>
-    <div class="mt-1 flex items-center justify-between gap-0.5" role="group" aria-label="Music">
+    <div class="mt-1 flex items-center justify-between gap-0.5" role="group" aria-label="Player">
       <button
         class="ctl"
         class:on={loved}
         aria-pressed={loved}
         aria-label="Love this track"
         title="Love this track: it comes up more often"
-        disabled={!music.current}
+        disabled={music.focus || !music.current}
         onclick={toggleLove}
       >
         <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
@@ -114,14 +267,14 @@
         </svg>
       </button>
       <div class="flex items-center gap-0.5">
-        <button class="ctl" aria-label="Back" title="Back" onclick={back}>
+        <button class="ctl" aria-label="Back" title="Back" disabled={music.focus} onclick={back}>
           <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
             <path d="M3 3h2v10H3zM13 3v10L6 8z" fill="currentColor" />
           </svg>
         </button>
         <button
           class="ctl play"
-          aria-label={music.playing ? 'Pause the music' : 'Play the music'}
+          aria-label={`${music.playing ? 'Pause' : 'Play'} ${music.focus ? 'focus noise' : 'the music'}`}
           title={music.playing ? 'Pause' : 'Play'}
           onclick={togglePlay}
         >
@@ -133,7 +286,13 @@
             {/if}
           </svg>
         </button>
-        <button class="ctl" aria-label="Next track" title="Next" onclick={next}>
+        <button
+          class="ctl"
+          aria-label="Next track"
+          title="Next"
+          disabled={music.focus}
+          onclick={next}
+        >
           <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
             <path d="M11 3h2v10h-2zM3 3v10l7-5z" fill="currentColor" />
           </svg>
@@ -144,6 +303,7 @@
           aria-pressed={music.repeat}
           aria-label="Repeat this track"
           title="Repeat this track"
+          disabled={music.focus}
           onclick={toggleRepeat}
         >
           <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
@@ -165,7 +325,7 @@
         aria-pressed={passed}
         aria-label="Pass on this track"
         title="Pass on this track: it stops coming up"
-        disabled={!music.current}
+        disabled={music.focus || !music.current}
         onclick={togglePass}
       >
         <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true">
@@ -180,23 +340,21 @@
       </button>
     </div>
     <div class="mt-1 flex min-w-0 items-center gap-1.5">
-      <span class="w-7 shrink-0 text-end text-[10px] text-faint tabular-nums"
-        >{clock(music.time)}</span
-      >
+      <span class="w-7 shrink-0 text-end text-[10px] text-faint tabular-nums">{clock(time)}</span>
       <label class="sr-only" for="floor-seek">Where in the track</label>
       <input
         id="floor-seek"
         class="range min-w-0 flex-1"
         type="range"
         min="0"
-        max={music.duration || 1}
+        max={duration || 1}
         step="1"
-        value={music.time}
-        aria-valuetext={`${clock(music.time)} of ${clock(music.duration)}`}
-        disabled={!music.duration}
+        value={time}
+        aria-valuetext={`${clock(time)} of ${clock(duration)}`}
+        disabled={!duration}
         oninput={(e) => seek(Number(e.currentTarget.value))}
       />
-      <span class="w-7 shrink-0 text-[10px] text-faint tabular-nums">{clock(music.duration)}</span>
+      <span class="w-7 shrink-0 text-[10px] text-faint tabular-nums">{clock(duration)}</span>
       <div class="relative shrink-0" bind:this={volBox}>
         <button
           class="ctl"
@@ -218,7 +376,7 @@
               id="floor-volume-pop"
               class="flex flex-col items-center gap-1.5 rounded-xl bg-panel-solid px-1 py-2 shadow-float"
             >
-              <label class="sr-only" for="floor-volume">Music volume</label>
+              <label class="sr-only" for="floor-volume">Volume</label>
               <div class="upright">
                 <input
                   id="floor-volume"
@@ -235,7 +393,7 @@
               <button
                 class="ctl"
                 aria-pressed={music.volume === 0}
-                aria-label={music.volume === 0 ? 'Unmute the music' : 'Mute the music'}
+                aria-label={music.volume === 0 ? 'Unmute' : 'Mute'}
                 title={music.volume === 0 ? 'Unmute' : 'Mute'}
                 onclick={toggleMute}
               >
@@ -307,6 +465,21 @@
   .light.on {
     background: var(--color-sea);
     color: var(--color-night);
+  }
+  .source {
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+    block-size: 1.5rem;
+    padding-inline: 0.25rem;
+    border-radius: 0.375rem;
+    color: var(--color-muted);
+  }
+  .source:hover,
+  .source:focus-visible,
+  .source[aria-expanded='true'] {
+    background: var(--color-raise);
+    color: var(--color-ink);
   }
   .ctl {
     display: grid;

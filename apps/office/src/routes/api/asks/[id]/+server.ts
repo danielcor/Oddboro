@@ -8,9 +8,11 @@
 // it (`reply/+server.ts`), a filter only by creating it (`filter/+server.ts`),
 // and a folder ask only by giving the folder (`folder/+server.ts`). `chat`
 // says the owner answered on the ask's card in its Odd's chat, so the run the
-// answer starts replies there too.
+// answer starts replies there too. A yes to a level ask for Act takes the
+// owner's choice for work another Odd hands that Odd (`actsOnHandOffs`).
 import { error, json } from '@sveltejs/kit';
 import {
+  ActCheckNeeded,
   approveGoal,
   approvePlan,
   ask,
@@ -79,6 +81,7 @@ export const POST: RequestHandler = async ({ params, request }) => {
     report?: unknown;
     picks?: unknown;
     chat?: unknown;
+    actsOnHandOffs?: unknown;
   };
   const decision = DECISIONS.find((d) => d === body.decision);
   if (!decision) error(400, `Say ${DECISIONS.slice(0, -1).join(', ')} or ${DECISIONS.at(-1)}`);
@@ -94,8 +97,17 @@ export const POST: RequestHandler = async ({ params, request }) => {
   }
   let decided;
   try {
-    decided = await decideAsk(a.id, decision, reason || null, body.report === true, inChat);
+    decided = await decideAsk(
+      a.id,
+      decision,
+      reason || null,
+      body.report === true,
+      inChat,
+      typeof body.actsOnHandOffs === 'boolean' ? body.actsOnHandOffs : undefined
+    );
   } catch (e) {
+    // A yes to Act waits for the owner's Act check, and the ask stays open.
+    if (e instanceof ActCheckNeeded) error(409, e.message);
     error(400, e instanceof Error ? e.message : String(e));
   }
   if (!decided) error(409, 'This ask was already answered');

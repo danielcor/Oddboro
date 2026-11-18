@@ -43,6 +43,15 @@ During a Codex turn, **Send correction** steers that turn. **Stop** targets the 
 
 ## If delivery is unclear
 
+Before sending to Claude, the office checks that both parts of its paired
+plugin answer a fresh probe. If either is missing, the assignment fails
+without being sent. Under **Details**, connect the plugin in that conversation
+and reload it, then choose **Retry** on the saved assignment. An installed
+older plugin may need an update through `/plugin` first.
+
+An offered assignment that Claude has not taken within a minute becomes
+uncertain. The office does not resend it. A late answer can still finish it.
+
 The office saves the instruction before submitting it. A connection failure after submission can leave a tool action complete even though the office missed its reply. Reconnect, inspect the native history and project files, then clear the uncertain request. Sending a new instruction is a separate action. If Claude is waiting to take an assignment, open its terminal to see trust, sign-in, permission or plugin messages. Managed installations must permit the plugin and its monitor. An attached background job belongs to Claude and can outlive the office.
 
 ## Review the implementation
@@ -59,7 +68,7 @@ The office saves the instruction before submitting it. A connection failure afte
 
 Run `npm test -w @oddboro/ledger`, `npm test -w @oddboro/office`, `npm run check-types` and `npm run lint` from the checkout using Node 24 or later. The project-session ledger tests use a disposable database. They exercise competing claims, changed grants, repeated replies and delivery to a thread.
 
-For a native test, run a separate office on unused office and database ports with a temporary office home. Use a disposable project and signed-in clients. Keep a second conversation open in the same folder. Give the first conversation a unique fact, ask an Odd to use a project-only file, correct the assignment, then inspect the reply in both the office and the original client. Compare the full native IDs. Confirm that the second conversation received nothing. Repeat with permission denial, a stopped turn, an office restart and a revoked Odd.
+For a native test, run a separate office on an unused office port (on Windows, an unused database port too) with a temporary office home. Use a disposable project and signed-in clients. Keep a second conversation open in the same folder. Give the first conversation a unique fact, ask an Odd to use a project-only file, correct the assignment, then inspect the reply in both the office and the original client. Compare the full native IDs. Confirm that the second conversation received nothing. Repeat with permission denial, a stopped turn, an office restart and a revoked Odd.
 
 The desktop terminal check uses the same launcher as the office. On Windows, `packages/ledger/src/project-terminal.ts` uses the bundled console and releases the input pipe and output worker after the child exits. Keep `node-pty` pinned until the [upstream cleanup issue](https://github.com/microsoft/node-pty/issues/965) is fixed and the check passes without the workaround.
 

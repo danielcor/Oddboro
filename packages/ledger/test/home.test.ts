@@ -1,8 +1,17 @@
 // Where a test's office lives when the test names none: never the owner's
-// real office or the port it answers on. Run with `npm test -w @oddboro/ledger`.
+// real office or the port it answers on. And the office home is the owner's
+// alone. Run with `npm test -w @oddboro/ledger`.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { test } from 'node:test';
@@ -27,3 +36,25 @@ test("under node --test with no ODDBORO_HOME, the office is a throwaway folder a
   assert.ok(!existsSync(home), 'the throwaway office outlived its process');
   assert.equal(port, 54399);
 });
+
+test(
+  'the office makes its home private as it starts, a new one and one an older version left open',
+  { skip: process.platform === 'win32' && 'Windows keeps other accounts out of the profile' },
+  async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'oddboro-private-'));
+    const office = join(parent, 'office');
+    mkdirSync(office);
+    chmodSync(office, 0o755);
+    process.env.ODDBORO_HOME = office;
+    try {
+      const { makeHomePrivate } = await import('../src/home.ts');
+      makeHomePrivate();
+      assert.equal(statSync(office).mode & 0o777, 0o700);
+      rmSync(office, { recursive: true });
+      makeHomePrivate();
+      assert.equal(statSync(office).mode & 0o777, 0o700);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }
+);

@@ -69,6 +69,9 @@ export const OWNER_ACTIONS = {
     notAnAction: "Writes the page's boot or error to the log on this computer; no record changes."
   },
   'PUT /api/diagnostics': { notAnAction: SETUP },
+  // The weather place and unit, kept in .env with the office settings.
+  'PUT /api/weather': { notAnAction: SETUP },
+  'DELETE /api/weather': { notAnAction: SETUP },
   'POST /api/diagnostics/envelope': {
     notAnAction: "Passes the page's error report through the office's filter; nothing is kept."
   },
@@ -93,6 +96,17 @@ export const OWNER_ACTIONS = {
   'POST /api/asks/[id]/filter': { records: 'decision' },
   'POST /api/asks/[id]/folder': { records: 'decision' },
   'POST /api/asks/[id]/reply': { records: 'decision' },
+  'POST /api/backup': {
+    notAnAction:
+      "Closes the line the page shows after a restore, kept in the office's home; no record changes."
+  },
+  'POST /api/backup/restore': {
+    none: 'Puts a backup in place of the whole office at its next start, the database included; the office before it is saved aside.'
+  },
+  'POST /api/browser-link': {
+    notAnAction:
+      "Makes a one-time link for the owner's browser, kept in memory for a minute; no record changes."
+  },
   'PUT /api/files': { records: 'work' },
   'POST /api/files/open': {
     notAnAction: 'Opens a page the Odd built in the browser; it changes nothing.'
@@ -158,8 +172,14 @@ export const OWNER_ACTIONS = {
   'POST /api/setup/claude': { notAnAction: SETUP },
   'DELETE /api/setup/claude': { notAnAction: SETUP },
   'POST /api/setup/notify': { notAnAction: SETUP },
+  'POST /api/setup/search': { notAnAction: SETUP },
   // The owner's yes to Advanced mode's warning, and turning it off again.
   'PUT /api/setup/advanced': { records: 'decision' },
+  // The owner's answers to the Act check (`passActCheck`).
+  'POST /api/act-check': {
+    mayRecord: ['decision'],
+    when: 'One row the first time every answer is right. None for a wrong answer, or once the check was passed.'
+  },
   'PATCH /api/services/[id]': { records: 'access' },
   'POST /api/services/[id]': { none: NO_ROW },
   // The owner's Refresh (`refreshTools`).
@@ -182,6 +202,7 @@ export const OWNER_ACTIONS = {
   'PATCH /api/staff/[id]#effort': { records: 'access' },
   'PATCH /api/staff/[id]#model': { records: 'access' },
   'PATCH /api/staff/[id]#account': { records: 'access' },
+  'PATCH /api/staff/[id]#actsOnHandOffs': { records: 'access' },
   'POST /api/staff/[id]/access': { records: 'access' },
   'PATCH /api/staff/[id]/access': { records: 'access' },
   'DELETE /api/staff/[id]/access': { records: 'access' },
@@ -203,6 +224,13 @@ export const OWNER_ACTIONS = {
   'POST /api/staff/[id]/chat': {
     notAnAction:
       "The chat's own log keeps it; a decision in it is recorded by the tool the Odd calls."
+  },
+  'PUT /api/staff/[id]/skills': {
+    mayRecord: ['work'],
+    when: 'The owner adds, updates or removes a skill. A stale copy changes nothing.'
+  },
+  'POST /api/staff/[id]/description': {
+    notAnAction: 'A read through POST: what saving a changed agent file would ask for.'
   },
   'PUT /api/staff/[id]/description': { records: 'work' },
   'POST /api/staff/[id]/jobs': { none: NO_ROW },

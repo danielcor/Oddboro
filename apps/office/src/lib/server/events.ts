@@ -2,7 +2,7 @@
 // Postgres NOTIFY, whichever process wrote it), a staffer started or stopped
 // working, an Odd kept or used a lesson, an Odd handed a colleague work or got
 // its result back, the New Altitude sign-in changed, or a persona was signed
-// in to or joined the office. /api/events streams it to the page. Nothing
+// in to or joined the office, or the weather setting changed. /api/events streams it to the page. Nothing
 // polls.
 import { EventEmitter } from 'node:events';
 import {
@@ -27,11 +27,17 @@ export type HandOffEvent = { type: 'hand-off' } & HandOffNews;
 
 export type OfficeEvent =
   | { type: 'change'; table: string }
-  | { type: 'working'; working: Record<string, string>; inProgress: Record<string, Work[]> }
+  | {
+      type: 'working';
+      chatting: string[];
+      inProgress: Record<string, Work[]>;
+    }
   | { type: 'persona'; slug: string; joined: Offer['joined']; problem?: string }
   | LessonEvent
   | HandOffEvent
-  | { type: 'account'; status: AccountStatus };
+  | { type: 'account'; status: AccountStatus }
+  /** The owner changed the weather setting: each window asks for it again. */
+  | { type: 'weather' };
 
 type Bus = EventEmitter & { listening?: Promise<unknown> };
 const g = globalThis as unknown as { officeBus?: Bus };

@@ -1,35 +1,63 @@
+// embed.ts with a stand-in model (stand-in-model.ts): onnxruntime-node runs
+// for real, on a small graph pinned the way the real files are, so nothing is
+// downloaded. search-model-real.test.ts runs Nomic's own file when it is here.
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { after, test } from 'node:test';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { mock, test } from 'node:test';
+import { standInFiles } from './stand-in-model.ts';
 
-// A free port with nothing on it yet: Ollama is not running.
-const probe = createServer();
-await new Promise<void>((done) => probe.listen(0, '127.0.0.1', done));
-const port = (probe.address() as AddressInfo).port;
-await new Promise<void>((done) => probe.close(() => done()));
-process.env.OLLAMA_URL = `http://127.0.0.1:${port}`;
-const { embed } = await import('../src/embed.ts');
+const real = await import('../src/search-model.ts');
+const { files, contents } = standInFiles();
+mock.module('../src/search-model.ts', {
+  namedExports: {
+    ...real,
+    MODEL_FILES: files,
+    modelOnDisk: () =>
+      files.every(
+        (f) => statSync(join(real.modelDir(), f.name), { throwIfNoEntry: false })?.size === f.bytes
+      ),
+    mismatched: (dir: string) => real.mismatched(dir, files)
+  }
+});
+const { embed, forgetModel, modelProblem, DIMENSIONS } = await import('../src/embed.ts');
 
-let asked = 0;
-const stuck = createServer(() => {
-  asked++;
+function place(change: (name: string, b: Buffer) => Buffer = (_, b) => b) {
+  mkdirSync(real.modelDir(), { recursive: true });
+  for (const [name, b] of Object.entries(contents))
+    writeFileSync(join(real.modelDir(), name), change(name, Buffer.from(b)));
+}
+
+test('with no model there is no vector, and nothing is wrong', async () => {
+  assert.equal(await embed('the owner approved the budget', 'document'), null);
+  assert.equal(modelProblem(), '');
 });
 
-after(() => {
-  stuck.closeAllConnections();
-  stuck.close();
+test('a model file that does not match its checksum is refused and removed', async () => {
+  // The same size, one byte changed.
+  place((name, b) => {
+    if (name === 'vocab.txt') b[b.length - 1] ^= 1;
+    return b;
+  });
+  assert.equal(await embed('the owner approved the budget', 'document'), null);
+  assert.equal(modelProblem(), 'mismatch');
+  assert.ok(!existsSync(real.modelDir()), 'nothing of it is kept');
 });
 
-test('an Ollama that is not running is tried again, and one that never answers is left alone a while', async () => {
-  assert.equal(await embed('a line before Ollama starts', 'document', 300), null);
-  // Ollama starts, but never answers. The refusal paused nothing, so the next line reaches it.
-  await new Promise<void>((done) => stuck.listen(port, '127.0.0.1', done));
-  const started = Date.now();
-  assert.equal(await embed('a line for the ledger', 'document', 300), null);
-  assert.ok(Date.now() - started < 3000);
-  assert.equal(asked, 1);
-  // The timeout paused it: the line after never reaches Ollama.
-  assert.equal(await embed('the next line', 'document', 300), null);
-  assert.equal(asked, 1);
+test('a 768-number vector of length 1, the same each time, made in this process', async () => {
+  forgetModel();
+  place();
+  const v = await embed('the owner approved the budget', 'document');
+  assert.ok(v);
+  assert.equal(v.length, DIMENSIONS);
+  assert.ok(v.every(Number.isFinite));
+  assert.ok(Math.abs(Math.hypot(...v) - 1) < 1e-9, 'scaled to length 1');
+  assert.deepEqual(await embed('the owner approved the budget', 'document'), v, 'the same twice');
+  assert.notDeepEqual(
+    await embed('the owner approved the budget', 'query'),
+    v,
+    'a query is told apart'
+  );
+  assert.notDeepEqual(await embed('garden water', 'document'), v, 'and another text');
+  assert.equal(modelProblem(), '');
 });

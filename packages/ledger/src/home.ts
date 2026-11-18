@@ -1,10 +1,11 @@
 // Where Oddboro keeps the owner's office, where its own code lives, and the
 // port it answers on. A release sets these from the app (apps/desktop); in
 // development they fall back to ~/.oddboro, this repo and port 4500.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { extname, join, normalize, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { currentPlatform } from './platform.ts';
 
 /**
  * True inside the Mac app (apps/desktop), which opens the office in its own
@@ -34,6 +35,22 @@ function officeHome(): string {
 }
 export const home = (...parts: string[]): string => join(officeHome(), ...parts);
 
+/**
+ * Make the office home private, as the office starts: only the owner's account
+ * may open it, so no other account on this computer reads the database, the
+ * sign-ins or the Odds' files, or reaches the database's socket (db.ts). An
+ * older version left the home at 755, so an existing one closes too.
+ * Nothing inside needs a mode of its own: no account reaches a file through a
+ * folder it cannot open, so PGlite's files at 666 stay as they are.
+ * On Windows chmod only sets the read-only flag, so the office leaves it: by
+ * default the home sits in the owner's profile, which Windows keeps from other
+ * accounts. A home set elsewhere with ODDBORO_HOME keeps that folder's access.
+ */
+export function makeHomePrivate(): void {
+  mkdirSync(officeHome(), { recursive: true, mode: 0o700 });
+  if (currentPlatform() !== 'win32') chmodSync(officeHome(), 0o700);
+}
+
 /** Every account's folder: each coding tool's sign-ins, one folder each (accounts.ts). */
 export const accountsHome = (): string => home('accounts');
 /** One account's folder: the home its tool runs with (`GROK_HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`). */
@@ -43,8 +60,8 @@ export const accountHome = (tool: string, account: string): string =>
 /**
  * The office's own files at the top of an Odd's folder, by what each holds:
  * the chat log (staff.ts), the chat's run session, a persona's session at
- * its door (persona-door.ts), and the bug report a chat run drafted
- * (bug-drafts.ts). Each writer takes its name from here, so an
+ * its door (persona-door.ts), the bug report a chat run drafted
+ * (bug-drafts.ts), and its update request (chat-updates.ts). Each writer takes its name from here, so an
  * Odd never mails one, the Storage tab never lists one, and a replay never
  * names one as a change (`OFFICE_FILE_NAMES`).
  */
@@ -52,7 +69,8 @@ export const OFFICE_FILES = {
   chat: 'chat.jsonl',
   session: 'session.json',
   personaSession: 'persona-session.json',
-  bugDraft: 'bug-draft.json'
+  bugDraft: 'bug-draft.json',
+  updateRequest: 'update-request.json'
 } as const;
 export const OFFICE_FILE_NAMES: readonly string[] = Object.values(OFFICE_FILES);
 
@@ -91,7 +109,7 @@ export const chatSession = (id: string): string => home('staff', id, OFFICE_FILE
 /** The code: this repo in development, the app's Resources/server folder in a release. */
 export const CODE = process.env.ODDBORO_CODE || fileURLToPath(new URL('../../..', import.meta.url));
 
-/** The office's own port, and the database's inside it. */
+/** The office's own port, and on Windows the database's inside it (db.ts). */
 export const OFFICE_PORT = Number(process.env.ODDBORO_PORT) || 4500;
 export const OFFICE_URL = `http://127.0.0.1:${OFFICE_PORT}`;
 export const DATABASE_PORT = Number(process.env.ODDBORO_DB_PORT) || (UNDER_TEST ? 54399 : 54329);

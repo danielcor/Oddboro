@@ -87,3 +87,28 @@ test('withdraw with nothing named is refused', async () => {
   const r = await call(c, 'withdraw', {});
   assert.equal(r.error, true);
 });
+
+test('withdrawing an ask or task the owner already answered closes nothing and says so', async () => {
+  const asked = await raise('wren', 'Book the hall');
+  await O.decideAsk(asked.id, 'approve', null);
+  const [given] = await db
+    .insert(tasks)
+    .values({ staffId: 'wren', title: 'Sign in', why: 'w', steps: [] })
+    .returning();
+  assert.equal(await O.finishTask(given.id, true, 'Signed in.'), true);
+  const before = { ask: await askOf(asked.id), task: await taskOf(given.id) };
+
+  assert.equal(await O.withdrawAsk(asked.id, 'Wren took it off.'), false);
+  assert.equal(await O.withdrawTask(given.id, 'Wren took it off.'), false);
+  assert.deepEqual(await askOf(asked.id), before.ask);
+  assert.deepEqual(await taskOf(given.id), before.task);
+
+  const c = await toolServer('wren', { RUN_KEY: 'k-5', ...said });
+  const r = await call(c, 'withdraw', { asks: [asked.id], tasks: [given.id] });
+  assert.equal(r.error, false, r.text);
+  assert.match(r.text, /^Nothing was taken off\./);
+  assert.match(
+    r.text,
+    new RegExp(`Not yours or not open, so left as it is: ask ${asked.id}, task ${given.id}\\.`)
+  );
+});

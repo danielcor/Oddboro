@@ -1,0 +1,45 @@
+# A change to nothing but the site or the docs skips Checks (ci.yml), which
+# runs every test on a Mac, Linux and Windows. This runs what such a change
+# can break instead, on Linux only: the lint guards, prettier, and the site's
+# lint, types and build. A change that also touches the app runs both.
+name: Site and docs
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['apps/site/**', 'docs/**', '.github/workflows/site.yml']
+  push:
+    branches: [main]
+    paths: ['apps/site/**', 'docs/**', '.github/workflows/site.yml']
+
+permissions:
+  contents: read
+
+# A newer push to the same branch replaces a run still going.
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - run: npm run lint:guards
+
+      - run: npm run format:check
+
+      # The site's build needs the sprites and the world built first, which
+      # turbo does through each task's ^build.
+      - run: npx turbo run lint check-types build --filter=@oddboro/site

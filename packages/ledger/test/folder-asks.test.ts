@@ -104,15 +104,40 @@ test(
   async () => {
     await db
       .update(staff)
-      .set({ folders: [{ path: taxes, write: false }] })
+      .set({ folders: [{ path: receipts, write: false }] })
       .where(eq(staff.id, 'theo'));
     const r = await call(await theo('k-nested'), {
-      path: receipts,
+      path: taxes,
       level: 'write',
       why: 'w'
     });
-    assert.ok(r.error && r.text.endsWith(O.FOLDER_REFUSED.nested), r.text);
+    assert.ok(r.error && r.text.endsWith(O.FOLDER_REFUSED.readInsideChange), r.text);
     assert.deepEqual(await folderAsks(), []);
+  }
+);
+
+test(
+  'an Odd may ask to change a folder inside one it may read, and the yes gives it beside that one',
+  { skip: TEMP_IN_APPDATA },
+  async () => {
+    await db
+      .update(staff)
+      .set({ folders: [{ path: taxes, write: false }] })
+      .where(eq(staff.id, 'theo'));
+    const c = await theo('k-inner');
+    const r = await call(c, { path: receipts, level: 'write', why: 'w' });
+    assert.ok(!r.error, r.text);
+    const [a] = await folderAsks();
+    assert.deepEqual(await O.giveFolder(a.id, receipts, 'write'), {
+      given: { path: receipts, level: 'write' }
+    });
+    assert.deepEqual(await folders(), [
+      { path: taxes, write: false },
+      { path: receipts, write: true }
+    ]);
+    // Read only inside it stays covered by the folder it already reads.
+    const covered = await call(c, { path: receipts, level: 'read', why: 'w' });
+    assert.ok(covered.error && covered.text.includes('You already have'), covered.text);
   }
 );
 
@@ -186,8 +211,8 @@ test(
       .update(staff)
       .set({ folders: [{ path: receipts, write: false }] })
       .where(eq(staff.id, 'theo'));
-    const nested = await O.giveFolder(a.id, taxes, 'read');
-    assert.deepEqual(nested, { refused: O.FOLDER_REFUSED.nested, status: 400 });
+    const nested = await O.giveFolder(a.id, taxes, 'write');
+    assert.deepEqual(nested, { refused: O.FOLDER_REFUSED.readInsideChange, status: 400 });
     assert.equal((await row(a.id)).status, 'open');
     assert.deepEqual(await folders(), [{ path: receipts, write: false }]);
     assert.deepEqual(await db.select().from(ledger), []);
@@ -341,18 +366,16 @@ const STORED_STATES: StoredState[] = [
     give: 'secrets'
   },
   {
-    state: 'a subfolder of an ordinary stored folder is still covered, and still refused nested',
+    state:
+      'a subfolder of an ordinary stored folder is still covered for an ask, and the owner can give it',
     has: 'proj',
     asked: 'proj/src',
-    ask: 'covered',
-    give: 'nested'
+    ask: 'covered'
   },
   {
-    state: 'a folder holding an ordinary stored folder is still refused nested',
+    state: 'a folder holding an ordinary stored folder can be had, both to read',
     has: 'proj/pkg',
-    asked: 'proj',
-    ask: 'nested',
-    give: 'nested'
+    asked: 'proj'
   },
   {
     state: 'a folder holding a dropped child is refused nested',

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import type { Desk, AskRow, HandOffLine, PokeRow, ThreadLine } from '@oddboro/ledger';
+  import type { AskRow, HandOffLine, PokeRow, ThreadLine } from '@oddboro/ledger';
   import { FIRST_QUESTIONS, firstQuestionIn } from '@oddboro/ledger/first-questions';
   import { clockTime } from '@oddboro/ledger/time';
   import ChatAccessAsk from './ChatAccessAsk.svelte';
@@ -16,6 +16,7 @@
   import { chatAnswer } from './task-steps.ts';
   import BugReport from './BugReport.svelte';
   import { failedReply } from '../bug-report.ts';
+  import UpdatesSection from './UpdatesSection.svelte';
   import Lesson from './Lesson.svelte';
   import PersonaQuiet from './PersonaQuiet.svelte';
   import { newTurnId } from '#lib/staff/chat-input.ts';
@@ -35,16 +36,14 @@
   import { when, workLine } from './format.ts';
   import { chatRequest, takeDraft, type Delivered } from './chat-about.svelte.ts';
   import type { StaffProfile } from '../staff/roster.ts';
-  import { runningFor, toolWords, type Work, type WorkAbout } from '../staff/work.ts';
+  import { handOffProgress, workItems, type ReaderProps } from '../staff/odd-now.ts';
+  import { runningFor, toolWords, type WorkAbout } from '../staff/work.ts';
   import type { ChatEntry, ChatEvent, ChatSignIn } from '../staff/chat.ts';
   import { counting, dayBreaks, fullDate, stamp, took } from './chat-lines.ts';
   import { serviceNames } from './service-names.svelte.ts';
 
-  type Props = {
+  type Props = ReaderProps & {
     profile: StaffProfile;
-    desk: Desk;
-    staff: StaffProfile[];
-    onplan: (hires: AskRow[]) => void;
     /** Bumps when the office changes, e.g. a poke lands or is set. */
     version: number;
     /** Fires when a message goes out, so the floor can send the staffer to the owner's office. */
@@ -55,13 +54,13 @@
     visible: boolean;
     /** Opens something the staffer delivered, on the start side. */
     onitem: (item: Delivered) => void;
-    /** Everything the Odd is working on now, shown at the foot of the chat. */
-    work: Work[];
     /** Opens the info page at In progress. */
     onwork: () => void;
   };
 
   let {
+    now,
+    nowOf,
     profile,
     desk,
     staff,
@@ -71,9 +70,10 @@
     onend,
     visible,
     onitem,
-    work,
     onwork
   }: Props = $props();
+  /** Everything the Odd is working on now, shown at the foot of the chat. */
+  const work = $derived(workItems(now));
 
   // A hidden list has no height to scroll, so catch up when it shows.
   $effect(() => {
@@ -83,29 +83,6 @@
   /** A chat line as the page keeps it: one sent or streaming has no time yet. */
   type Line = Omit<ChatEntry, 'at'> & { at?: string; pending?: boolean };
 
-  /** Where a hand-off stands, in words, and whether the owner has to act. */
-  function progress(h: HandOffLine): { text: string; yours: boolean } {
-    if (h.status === 'queued') return { text: `${h.to} has not started yet`, yours: false };
-    // Back on it: the owner answered what an earlier step put on the desk.
-    if (h.status === 'working')
-      return { text: `${h.to} is ${h.backs.length ? 'back on it' : 'on it'}`, yours: false };
-    // A denial or a dropped task is the owner's answer, not the colleague failing.
-    const ended = h.answered
-      ? 'You answered'
-      : {
-          done: `${h.to} finished`,
-          failed: `${h.to} could not finish`,
-          waiting: `${h.to} is waiting on you`
-        }[h.status];
-    const next = h.backs.at(-1)?.pickUp.status;
-    if (!next || next === 'queued' || next === 'working')
-      return { text: `${ended} · ${h.from} is taking it from here`, yours: h.status === 'waiting' };
-    // Something on the desk outranks how the pick-up went: it still needs the owner.
-    if (next === 'waiting' || h.status === 'waiting')
-      return { text: 'Waiting on you', yours: true };
-    if (next === 'failed') return { text: `${h.from} could not pick it up`, yours: false };
-    return { text: h.status === 'done' ? 'Done' : ended, yours: false };
-  }
   /** A thread's steps in the order they happened: each hand-off given, and each run of the hub's own. */
   function threadSteps(
     t: NonNullable<Line['thread']>
@@ -249,6 +226,8 @@
   let draft = $state('');
   /** What the bug report form starts with, while it is open. */
   let bugReport = $state<{ title?: string; body: string }>();
+  // One live section per chat, even when the owner asked about updates before.
+  const latestUpdate = $derived(lines.findLast((line) => line.updates));
   let sending = $state(false);
   // The office already holds the text, files and reply target under this turn id.
   type Blocked = { turnId: string; signIn: ChatSignIn };
@@ -497,7 +476,7 @@
     if (visible && loaded) void call(`/api/staff/${profile.id}/pokes`, {}).catch(() => {});
   });
 
-  async function now(p: PokeRow) {
+  async function pokeNow(p: PokeRow) {
     await call(`/api/pokes/${p.id}`, {}).catch(() => {});
     upcoming = upcoming.filter((x) => x.id !== p.id);
   }
@@ -638,12 +617,15 @@
 
   /**
    * Retry under the owner's message while no reply answered its turn, a stopped
-   * one included, even after later messages. Not under words added to a turn:
-   * Retry on the turn's first message sends them too.
+   * one included, even after later messages. Not while that turn's reply still
+   * runs: a reopened card has no line of it yet, and learns it runs only from
+   * its load (`active`). Not under words added to a turn: Retry on the turn's
+   * first message sends them too.
    */
   function retryable(line: Line, i: number): boolean {
     if (sending || line.from !== 'owner' || !line.turnId || line.source?.kind === 'added')
       return false;
+    if (active?.turnId === line.turnId) return false;
     const answered = (l: Line) =>
       l.from === 'staff' && !l.failed && !l.pending && l.turnId === line.turnId;
     return !lines.slice(i + 1).some(answered);
@@ -771,6 +753,7 @@
             reply.text = ev.text;
             if (ev.choices?.length) reply.choices = ev.choices;
             if (ev.bug) reply.bug = ev.bug;
+            if (ev.updates) reply.updates = ev.updates;
             reply.pending = false;
             reply.at = new Date().toISOString();
           } else if (ev.type === 'error') {
@@ -810,7 +793,8 @@
     if (chatRequest.drafts[profile.id] === undefined || !visible) return;
     const d = takeDraft(profile.id) ?? '';
     if (d) typed('');
-    if (d) draft = draft.trim() ? `${draft.trimEnd()}\n\n${d}` : d;
+    // A draft the box already holds, say from pressing Use in chat twice, goes in once.
+    if (d && !draft.includes(d.trim())) draft = draft.trim() ? `${draft.trimEnd()}\n\n${d}` : d;
     void tick().then(() => {
       fit();
       box?.focus();
@@ -1135,7 +1119,7 @@
 
 <!-- Where the Odd asked a colleague, on its thread's card: one line whose status moves, the story inside. -->
 {#snippet gave(h: HandOffLine)}
-  {@const p = progress(h)}
+  {@const p = handOffProgress(h, nowOf)}
   <div class="rounded-xl border border-sea/40 px-3 py-2">
     <button
       class="flex w-full items-baseline gap-2 text-start"
@@ -1292,7 +1276,7 @@
       {:else if line.handOff}
         {@const h = line.handOff.line}
         {@const step = line.handOff.step}
-        {@const p = progress(h)}
+        {@const p = handOffProgress(h, nowOf)}
         {#if step === 'given'}
           <!-- In the colleague's chat, the hand-off is the giver asking. -->
           <div class="-mb-1 ms-1 text-[10px] tracking-[0.16em] text-sea uppercase">
@@ -1490,7 +1474,7 @@
           class="max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-relaxed break-words
           {line.from === 'owner'
             ? 'ms-auto rounded-ee-md bg-sea/25 whitespace-pre-wrap text-ink'
-            : `me-auto rounded-es-md bg-raise ${line.failed || line.runFailed ? 'text-coral' : 'text-ink'}`}"
+            : `me-auto rounded-es-md bg-raise ${line.failed || line.runFailed ? 'text-coral whitespace-pre-wrap' : 'text-ink'}`}"
         >
           {#if line.pending && !line.text}
             <span class="dots" aria-label="Replying"><span></span><span></span><span></span></span>
@@ -1510,6 +1494,11 @@
             <button class="choice" onclick={() => (bugReport = line.bug)}
               >File this bug report</button
             >
+          </div>
+        {/if}
+        {#if line === latestUpdate && !line.pending}
+          <div class="my-3 rounded-lg border border-line p-3">
+            <UpdatesSection showWindow={false} />
           </div>
         {/if}
         {#if retryable(line, i)}
@@ -1586,7 +1575,7 @@
     {#each upcoming as p (p.id)}
       <div class="me-auto ms-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
         <span>{profile.name} will message you at {clockTime(new Date(p.at))}.</span>
-        <button class="text-sea hover:text-ink" onclick={() => now(p)}>Send now</button>
+        <button class="text-sea hover:text-ink" onclick={() => pokeNow(p)}>Send now</button>
         <button
           class="text-faint hover:text-coral"
           aria-label={`Cancel the ${clockTime(new Date(p.at))} poke`}

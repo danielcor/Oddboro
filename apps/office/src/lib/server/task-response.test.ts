@@ -94,7 +94,7 @@ test('a response to a shared list stays on its task through a correction, a fail
   assert.equal(queued.length, 1);
   const claim = await L.startFollowUp(queued[0].id);
   assert.ok(claim);
-  const run = await followThrough(claim, undefined, undefined, queued[0].task);
+  const run = await followThrough(claim, undefined, queued[0].task);
   assert.equal(run.outcome, 'done', run.text);
   const { message, system } = JSON.parse(run.text) as Gave;
   assert.ok(

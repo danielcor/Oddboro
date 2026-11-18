@@ -1,9 +1,8 @@
 // Connectors and grants: giving, changing and taking back access to a tool.
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { db } from './db.ts';
 import { deleteSecret, getSecret } from './secrets.ts';
 import { fixedError } from './errors.ts';
-import { wakeOnTask } from './task-parking.ts';
 import { type Tx } from './threads.ts';
 import {
   connectors,
@@ -18,8 +17,11 @@ import { grantWorks, POSTAL_ID, POSTAL_NAME, type Level } from './access-words.t
 import type { AskRow, TaskRow, GrantRow, ConnectorRow } from './office.ts';
 import { staffer } from './office-staff.ts';
 import { record } from './office-ledger.ts';
-import { giveTask } from './office-tasks.ts';
+import { task } from './office-tasks.ts';
 import { ownerName } from './office-usage.ts';
+import { transitionWork } from './work/apply.ts';
+import type { EventOf, NewTask } from './work/events.ts';
+import { LEFT_RAISES_NOTHING } from './work/threads.ts';
 
 // Access
 
@@ -80,13 +82,24 @@ export async function grantAccess(
       g && conn.id !== GOOGLE[g].id && !conn.config.account
         ? `another ${conn.name} account`
         : conn.name;
-    await db.insert(tasks).values({
-      staffId,
-      askId,
-      title: `Connect ${called} for ${who.name}`,
-      why: `${who.name} needs ${conn.name} at ${req.level} level.`,
-      steps
+    // Through the work core: an Odd that left since the check above gets no
+    // task, and the task waits on any other change to this tool's connect tasks.
+    const went = await transitionWork({
+      kind: 'taskGiven',
+      task: {
+        staffId,
+        askId,
+        title: `Connect ${called} for ${who.name}`,
+        why: `${who.name} needs ${conn.name} at ${req.level} level.`,
+        steps
+      }
     });
+    if ('refused' in went)
+      throw new Error(
+        went.refused === LEFT_RAISES_NOTHING
+          ? `${who.name} left the office, so there is nothing to connect.`
+          : went.refused
+      );
     return { task: true, connector: conn.id };
   }
   // Already connected: the staffer can use it now, and nothing waits on the owner.
@@ -123,23 +136,20 @@ export async function reconnectTask(
     .from(grants)
     .where(and(eq(grants.staffId, staffId), eq(grants.connectorId, conn.id)));
   if (!grant) return { problem: `You were never given ${conn.name}. Use ask_for_access.` };
-  const open = await db
-    .select()
-    .from(tasks)
-    .where(and(eq(tasks.status, 'open'), eq(tasks.staffId, staffId)));
-  const waiting = open.find((t) =>
-    t.steps.some((st) => st.action && 'connector' in st.action && st.action.connector === conn.id)
-  );
-  if (waiting) return { task: waiting, already: true, keptOut: false };
   const takesKey = secretNames(conn).some((n) => n !== 'oauth');
-  const steps = connectSteps(conn, true);
-  const task = await giveTask(staffId, {
-    title: `Reconnect ${conn.name} for ${who.name}`,
-    why: problem,
-    steps: [...(takesKey ? getKey : []), ...steps],
-    byOffice: true
-  });
-  return { task, already: false, keptOut: !takesKey && getKey.length > 0 };
+  const { row, already } = await giveConnectTask(
+    {
+      staffId,
+      title: `Reconnect ${conn.name} for ${who.name}`,
+      why: problem,
+      steps: [
+        ...(takesKey ? getKey : []).map((text) => ({ text, done: false })),
+        ...connectSteps(conn, true)
+      ]
+    },
+    { connector: conn.id }
+  );
+  return { task: row, already, keptOut: !already && !takesKey && getKey.length > 0 };
 }
 
 /**
@@ -150,16 +160,33 @@ export async function reconnectTask(
 export async function changeAwsTask(connectorId: string): Promise<TaskRow> {
   const conn = await connector(connectorId);
   if (!conn || !isAws(conn.id)) throw new Error('Only an AWS tool has a role and Region to change');
-  const open = await db.select().from(tasks).where(eq(tasks.status, 'open'));
-  const waiting = open.find((t) =>
-    t.steps.some((st) => st.action?.kind === 'aws' && st.action.connector === conn.id)
+  const { row } = await giveConnectTask(
+    {
+      staffId: null,
+      title: `Change the role or Region for ${conn.name}`,
+      why: `You asked to change the AWS role or Region ${conn.name} uses.`,
+      steps: connectSteps(conn, true)
+    },
+    { connector: conn.id, aws: true }
   );
-  if (waiting) return waiting;
-  return giveTask(null, {
-    title: `Change the role or Region for ${conn.name}`,
-    why: `You asked to change the AWS role or Region ${conn.name} uses.`,
-    steps: connectSteps(conn, true)
-  });
+  return row;
+}
+
+/**
+ * Give a connect task in the office's name, unless an open one with a step
+ * for the tool answers it (`oneOpen`): the check and the insert are one
+ * transition, so two at once give one task.
+ */
+async function giveConnectTask(
+  t: NewTask,
+  oneOpen: NonNullable<EventOf<'taskGiven'>['oneOpen']>
+): Promise<{ row: TaskRow; already: boolean }> {
+  const went = await transitionWork({ kind: 'taskGiven', task: t, oneOpen });
+  if ('refused' in went) throw new Error(went.refused);
+  const already = went.change.result?.already;
+  const row = await task(already ?? went.real({ ref: 'task' }));
+  if (!row) throw fixedError('A task was given that is not there.');
+  return { row, already: already !== undefined };
 }
 
 /** The longest name the owner can give a service. */
@@ -258,7 +285,11 @@ function connectSteps(conn: ConnectorRow, again = false): Step[] {
             text: `Click Sign in. ${conn.config.oauth === 'google' ? 'Google' : conn.name}'s sign-in page opens in a new tab.`,
             done: false,
             key,
-            action: { kind: 'oauth' as const, connector: conn.id }
+            action: {
+              kind: 'oauth' as const,
+              connector: conn.id,
+              ...(conn.config.oauth === 'google' ? { google: true } : {})
+            }
           },
           {
             text: 'Approve access on that page. This step ticks itself when it lands.',
@@ -510,29 +541,14 @@ function secretNames(c: Pick<ConnectorRow, 'kind' | 'config'>, all = false): str
   ];
 }
 
-/** Drop the open tasks whose steps connect a tool, for one staffer or for all of them. */
+/**
+ * Drop the open tasks whose steps connect a tool, for one staffer or for all
+ * of them, and wake the work parked on each, in one transaction.
+ */
 async function dropConnectTasks(id: string, staffId?: string): Promise<void> {
-  const open = await db
-    .select()
-    .from(tasks)
-    .where(
-      staffId ? and(eq(tasks.status, 'open'), eq(tasks.staffId, staffId)) : eq(tasks.status, 'open')
-    );
-  const stale = open.filter((t) =>
-    t.steps.some((s) => s.action && 'connector' in s.action && s.action.connector === id)
-  );
-  if (!stale.length) return;
-  await db
-    .update(tasks)
-    .set({ status: 'dropped' })
-    .where(
-      inArray(
-        tasks.id,
-        stale.map((t) => t.id)
-      )
-    );
-  const owner = await ownerName();
-  for (const t of stale) await wakeOnTask(t, { ended: 'dropped', owner });
+  const went = await transitionWork({ kind: 'connectTasksDropped', connector: id, staffId });
+  // The decider drops what is open and never refuses.
+  if ('refused' in went) throw fixedError('Dropping connect tasks was refused.');
 }
 
 /**
@@ -578,27 +594,33 @@ async function forgetConnector(id: string): Promise<{ forgot: boolean; googleTol
     googleTold = shared.length ? { kept: shared.map((o) => o.name) } : await revokeAtGoogle(id);
   }
   const removed = secretNames(c, true).filter((name) => deleteSecret(id, name));
+  const hadVaultKeys = Object.keys(c.config.fromAws ?? {}).length > 0;
   if (product && id !== GOOGLE[product].id) {
     await db.delete(connectors).where(eq(connectors.id, id));
-    return { forgot: removed.length > 0, googleTold };
-  }
-  if (removed.length || id === POSTAL_ID) {
+  } else if (removed.length || hadVaultKeys || id === POSTAL_ID) {
     const config = { ...c.config };
     delete config.account;
     delete config.pmb;
+    delete config.fromAws;
     await db
       .update(connectors)
       .set({
         readyAt: null,
+        config,
         ...(product
-          ? { name: GOOGLE[product].name, config }
+          ? { name: GOOGLE[product].name }
           : id === POSTAL_ID
-            ? { name: POSTAL_NAME, config, tools: [], readTools: [] }
+            ? { name: POSTAL_NAME, tools: [], readTools: [] }
             : {})
       })
       .where(eq(connectors.id, id));
   }
-  return { forgot: removed.length > 0, googleTold };
+  if (hadVaultKeys) {
+    // The last dependent tool can outlive the last direct Secrets Manager grant.
+    const vault = await connector(AWS_SECRETS_ID);
+    if (vault && !(await hasGrants(vault.id))) await forgetAws(vault);
+  }
+  return { forgot: removed.length > 0 || hadVaultKeys, googleTold };
 }
 
 /**
@@ -711,6 +733,15 @@ export async function setGrantLevel(
   });
 }
 
+async function hasGrants(connectorId: string): Promise<boolean> {
+  const [held] = await db
+    .select({ id: grants.staffId })
+    .from(grants)
+    .where(eq(grants.connectorId, connectorId))
+    .limit(1);
+  return !!held;
+}
+
 export async function revoke(staffId: string, connectorId: string): Promise<void> {
   const [gone] = await db
     .delete(grants)
@@ -718,11 +749,7 @@ export async function revoke(staffId: string, connectorId: string): Promise<void
     .returning();
   if (!gone) return;
   await dropConnectTasks(connectorId, staffId);
-  const [held] = await db
-    .select({ staffId: grants.staffId })
-    .from(grants)
-    .where(eq(grants.connectorId, connectorId))
-    .limit(1);
+  const held = await hasGrants(connectorId);
   const [c, who] = await Promise.all([connector(connectorId), staffer(staffId)]);
   const { forgot, googleTold } = held ? { forgot: false } : await forgetConnector(connectorId);
   await record({
@@ -730,7 +757,7 @@ export async function revoke(staffId: string, connectorId: string): Promise<void
     actor: 'owner',
     title: `Revoked ${c?.name ?? connectorId} for ${who?.name ?? staffId}`,
     body: forgot
-      ? `No Odd holds it now, so its saved keys and sign-ins came out of this computer's password store.${
+      ? `No Odd holds it now. The office removed its saved connection details.${
           googleTold === true
             ? ' Google cancelled the sign-in too.'
             : googleTold === false

@@ -1,9 +1,21 @@
 // What must work in the app before a release goes out, checked on the real
-// build: it installs and starts, says the version it is, refuses a write from
-// anyone but its own page, takes the page's writes, passes its setup checks,
-// onboards, shows its page in the real window and answers a press there,
-// quits cleanly and starts again with its data. Each step is one row of a
-// table; a failed required row fails the run. `driver.ts` does the driving.
+// build: it installs and starts, says the version it is, refuses anything
+// without the app's key, refuses a write from anyone but its own page, takes
+// the page's writes, passes its setup checks, onboards, shows its page in the
+// real window and answers a press there, quits cleanly and starts again with
+// its data. Each step is one row of a table; a failed required row fails the
+// run. `driver.ts` does the driving.
+//
+// The office in the app answers only requests with the app's key, which the
+// real app's shell keeps in memory. So the checks that need the office's
+// answers run where a key can come along: on the staged server (--stage),
+// which this run starts and gives a key as the shell would, and on Linux from
+// inside the real page. On a Mac and Windows the real app's run reads the
+// setup checks from the log instead: the office writes `office: setup <id>
+// ok|fail` for each when the window's welcome asks for them. Onboarding and
+// its data across a restart are not checked there. The shell starts each of
+// the office's lines with the time in UTC (`2026-11-13T04:16:47.786Z office:
+// ...`); builds before that wrote none, so the log's patterns take either.
 //
 //   node apps/desktop/scripts/smoke.ts --artifact <installer|AppImage|dmg> --version 0.0.9
 //   node apps/desktop/scripts/smoke.ts --from <folder> --version 0.0.9
@@ -22,6 +34,7 @@
 // through its shell, in the Keychain the owner's Oddboro uses, so off CI it
 // runs only with --my-keychain.
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHmac, randomBytes } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
@@ -43,6 +56,7 @@ import {
   DB_PORT,
   fileVersion,
   getJson,
+  inPage,
   installLinux,
   installMac,
   installWindows,
@@ -51,7 +65,9 @@ import {
   LINUX,
   logText,
   MAC,
+  keyLine,
   makeRun,
+  type Office,
   type Page,
   pageHeaders,
   plist,
@@ -69,7 +85,8 @@ import {
   uninstallEntry,
   until,
   webdriverStart,
-  WIN
+  WIN,
+  withKey
 } from './driver.ts';
 
 const DESKTOP = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -138,54 +155,122 @@ function expectStatus(r: { status: number; text: string }, status: number): stri
 }
 
 /** The office's version: /api/health on a build that has it, /api/update before. */
-async function runningVersion(): Promise<{ version: string; health: boolean }> {
-  const health = await fetch(`${BASE}/api/health`).then(
-    (r) => (r.ok ? r.json() : undefined),
-    () => undefined
-  );
-  if (health) return { version: (health as { version: string }).version, health: true };
-  return { version: (await getJson<{ current: string }>('/api/update')).current, health: false };
+async function runningVersion(office: Office): Promise<{ version: string; health: boolean }> {
+  const health = await office.getJson<{ version: string }>('/api/health').catch(() => undefined);
+  if (health) return { version: health.version, health: true };
+  return {
+    version: (await office.getJson<{ current: string }>('/api/update')).current,
+    health: false
+  };
 }
 
-/** The checks every start of the office gets, the staged server's included. */
-async function officeChecks(expect: { version?: string; claude: boolean }): Promise<boolean> {
+/** The version the office's first log line names (`office: <version> on ...`). */
+function loggedVersion(log: string): { version: string; health: boolean } {
+  const found = [...log.matchAll(/^(?:\S+Z )?office: (\S+) on /gm)].at(-1);
+  if (!found) throw new Error('no office: line in the log');
+  return { version: found[1], health: true };
+}
+
+/** What a request without the app's key gets (`apps/office/src/lib/server/app-key.ts`). */
+const OPEN_FROM_APP = 'This office opens only in the Oddboro app. Open Oddboro to see it.';
+
+/** A row that needs the app's key, which only the real app's shell holds. */
+const keptInTheApp = (name: string) =>
+  step(name, false, () => {
+    throw new Error('not checked here: the app keeps its key to itself. --stage checks it');
+  });
+
+/** Each setup check's last state in the log (`office: setup <id> ok|fail`), by id. */
+function setupFromLog(log: string): Map<string, string> {
+  return new Map(
+    [...log.matchAll(/^(?:\S+Z )?office: setup ([a-z0-9-]+) (ok|fail)$/gm)].map((m) => [m[1], m[2]])
+  );
+}
+
+/** The setup checks pass: the database, and Claude Code where the run put a stand-in. */
+function setupPasses(state: (id: string) => string | undefined, claude: boolean, summary: string) {
+  if (state('database') !== 'ok') throw new Error(`the database is not ok: ${summary}`);
+  if (claude && state('claude') !== 'ok')
+    throw new Error(`the stand-in Claude Code was not found: ${summary}`);
+  return summary;
+}
+
+/**
+ * The checks every start of the office gets, the staged server's included.
+ * `office` asks with the app's key: over HTTP with the one this run gave the
+ * staged server, from inside the page on Linux, or none for the real app on a
+ * Mac and Windows, where the version comes from the log.
+ */
+async function officeChecks(
+  expect: { version?: string; claude: boolean },
+  office: Office | undefined,
+  log: () => string,
+  http: boolean
+): Promise<boolean> {
   const found = await step('says the version it is', true, async () => {
-    const r = await runningVersion();
+    const r = office ? await runningVersion(office) : loggedVersion(log());
     if (expect.version && r.version !== expect.version)
       throw new Error(`${r.version}, not ${expect.version}`);
     return r;
   });
-  await step('refuses a write with no Origin', true, async () =>
-    expectStatus(await send('DELETE', '/api/pokes/999999', {}), 403)
+  await step("refuses any request without the app's key, a read too", true, async () => {
+    for (const [method, headers] of [
+      ['GET', {}],
+      ['DELETE', pageHeaders(true)]
+    ] as const) {
+      const r = await send(method, '/api/pokes/999999', headers);
+      if (r.status !== 403 || r.text !== OPEN_FROM_APP)
+        throw new Error(`${method}: expected 403 "${OPEN_FROM_APP}", got ${r.status} ${r.text}`);
+    }
+    return `403 ${OPEN_FROM_APP}`;
+  });
+  await step("serves the page's own built files without the key", true, async () =>
+    JSON.stringify(await getJson('/_app/version.json'))
   );
-  await step('takes a write shaped as the page sends it, with Sec-Fetch-Site', true, async () =>
-    expectStatus(await send('DELETE', '/api/pokes/999999', pageHeaders(true)), 404)
-  );
-  await step('takes it with Origin only, as older WebKit sends it', true, async () =>
-    expectStatus(await send('DELETE', '/api/pokes/999999', pageHeaders(false)), 404)
-  );
-  // The checks start programs (claude --version and others): 35 s on the arm64 Windows runner.
-  await step(
-    `passes its setup checks${expect.claude ? ', Claude Code found (PR #18)' : ''}`,
-    true,
-    async () => {
-      const { checks } = await getJson<{ checks: { id: string; state: string; found: string }[] }>(
-        '/api/setup',
+  // A request the page's browser makes always carries its own Origin, so these need HTTP.
+  if (office && http) {
+    await step('refuses a write with the key but no Origin', true, async () =>
+      expectStatus(await office.send('DELETE', '/api/pokes/999999', {}), 403)
+    );
+    await step('takes a write shaped as the page sends it, with Sec-Fetch-Site', true, async () =>
+      expectStatus(await office.send('DELETE', '/api/pokes/999999', pageHeaders(true)), 404)
+    );
+    await step('takes it with Origin only, as older WebKit sends it', true, async () =>
+      expectStatus(await office.send('DELETE', '/api/pokes/999999', pageHeaders(false)), 404)
+    );
+  }
+  const setupName = `passes its setup checks${expect.claude ? ', Claude Code found (PR #18)' : ''}`;
+  const onboardName = 'onboards with a ready-made manager';
+  if (!office) {
+    // The window's welcome has asked for the checks by now; they can take 35 s on a slow runner.
+    await step(setupName, true, async () => {
+      const states = await until(
+        'the setup checks in the log',
+        async () => {
+          const seen = setupFromLog(log());
+          return seen.has('database') ? seen : undefined;
+        },
         90
       );
-      const summary = checks.map((c) => `${c.id}: ${c.state} (${c.found})`).join('; ');
-      const state = (id: string) => checks.find((c) => c.id === id)?.state;
-      if (state('database') !== 'ok') throw new Error(`the database is not ok: ${summary}`);
-      if (expect.claude && state('claude') !== 'ok')
-        throw new Error(`the stand-in Claude Code was not found: ${summary}`);
-      return summary;
-    }
-  );
-  // Each ledger line waits for its embedding: with Ollama installed, the first
-  // one loads the model cold, about 20 s.
-  await step('onboards with a ready-made manager', true, async () =>
+      const summary = [...states].map(([id, state]) => `${id}: ${state}`).join('; ');
+      return setupPasses((id) => states.get(id), expect.claude, summary);
+    });
+    await keptInTheApp(onboardName);
+    return found?.health ?? false;
+  }
+  // The checks start programs (claude --version and others): 35 s on the arm64 Windows runner.
+  await step(setupName, true, async () => {
+    const { checks } = await office.getJson<{
+      checks: { id: string; state: string; found: string }[];
+    }>('/api/setup', 90);
+    const summary = checks.map((c) => `${c.id}: ${c.state} (${c.found})`).join('; ');
+    return setupPasses((id) => checks.find((c) => c.id === id)?.state, expect.claude, summary);
+  });
+  // Each ledger line waits for its embedding: with the search model downloaded,
+  // the first one loads it, well under a second on an M-series Mac.
+  await step(onboardName, true, async () =>
     expectStatus(
-      await send(
+      await office.send(
         'POST',
         '/api/onboarding',
         pageHeaders(true),
@@ -315,6 +400,9 @@ async function smokeStage(): Promise<void> {
     throw new Error('No staged server: run node apps/desktop/scripts/stage.ts first');
   const r = makeRun(OUT);
   currentRun = r;
+  // A fresh key, as the app's shell makes one, given to the server the same way.
+  const key = randomBytes(32).toString('hex');
+  const office = withKey(key);
   const start = (): ChildProcess => {
     appendFileSync(r.log, `--- start at ${new Date().toISOString()}\n`);
     const server = spawn(
@@ -345,6 +433,7 @@ async function smokeStage(): Promise<void> {
     );
     server.stdout?.on('data', (d) => appendFileSync(r.log, d));
     server.stderr?.on('data', (d) => appendFileSync(r.log, d));
+    server.stdin?.write(keyLine(key));
     return server;
   };
   const answered = (server: ChildProcess) =>
@@ -355,9 +444,8 @@ async function smokeStage(): Promise<void> {
           throw new Error(
             `it exited ${server.exitCode}: ${readFileSync(r.log, 'utf8').slice(-800)}`
           );
-        return (await fetch(`${BASE}/api/update`, { signal: AbortSignal.timeout(2000) })).ok
-          ? true
-          : undefined;
+        const r = await office.send('GET', '/api/update', {}, undefined, 2).catch(() => undefined);
+        return r?.status === 200 ? true : undefined;
       },
       90
     );
@@ -382,21 +470,38 @@ async function smokeStage(): Promise<void> {
     await stop(server).catch(() => undefined);
     return;
   }
-  const health = await officeChecks({ version: '0.0.0-smoke', claude: false });
+  // As the shell checks before it trusts the server on the port.
+  await step('proves it holds the key it was given, without the key', true, async () => {
+    const nonce = randomBytes(32).toString('hex');
+    const r = await send('GET', `/api/proof?nonce=${nonce}`, {});
+    const want = createHmac('sha256', key).update(`oddboro-proof:${nonce}`).digest('hex');
+    if (r.status !== 200 || r.text !== want) throw new Error(`got ${r.status} ${r.text}`);
+    return 'HMAC-SHA256 of the label and the nonce';
+  });
+  const health = await officeChecks(
+    { version: '0.0.0-smoke', claude: false },
+    office,
+    () => readFileSync(r.log, 'utf8'),
+    true
+  );
   await step('serves its health, with every startup step', health, async () => {
-    const h = await getJson<{ steps: Record<string, number>; readyMs: number | null }>(
+    const h = await office.getJson<{ steps: Record<string, number>; readyMs: number | null }>(
       '/api/health'
     );
-    if (!h.readyMs || !h.steps.tables) throw new Error(JSON.stringify(h));
+    if (!h.readyMs || !h.steps.tables || h.steps.key === undefined)
+      throw new Error(JSON.stringify(h));
     return h;
   });
   await step("takes the page's report for the log, and nobody else's", health, async () => {
     expectStatus(
-      await send('POST', '/api/client-log', pageHeaders(true), { kind: 'error', message: 'smoke' }),
+      await office.send('POST', '/api/client-log', pageHeaders(true), {
+        kind: 'error',
+        message: 'smoke'
+      }),
       200
     );
     expectStatus(
-      await send('POST', '/api/client-log', {}, { kind: 'error', message: 'smoke' }),
+      await office.send('POST', '/api/client-log', {}, { kind: 'error', message: 'smoke' }),
       403
     );
     await sleep(500);
@@ -408,7 +513,7 @@ async function smokeStage(): Promise<void> {
   server = start();
   await step('starts again with its data', true, async () => {
     await answered(server);
-    const setup = await getJson<{ welcomed?: boolean }>('/api/setup', 90);
+    const setup = await office.getJson<{ welcomed?: boolean }>('/api/setup', 90);
     if (!setup.welcomed) throw new Error('it forgot the onboarding');
     return 'still onboarded';
   });
@@ -560,7 +665,13 @@ async function smokeApp(): Promise<void> {
       if (status !== 404) throw new Error(`got ${status}`);
       return status;
     });
-  const health = await officeChecks({ version: args.version, claude });
+  // On Linux the checks ask from inside the real page, which carries the key.
+  const health = await officeChecks(
+    { version: args.version, claude },
+    script ? inPage(script) : undefined,
+    () => logText(r),
+    false
+  );
   await step('the log has the window loading the page, and the page booting', health, async () => {
     const text = await until(
       'both lines',
@@ -576,16 +687,38 @@ async function smokeApp(): Promise<void> {
       .join(' / ');
   });
   await step('no errors in the page', health, async () => {
-    const h = await getJson<{ pageErrors: number; pages: number }>('/api/health');
-    if (h.pageErrors)
-      throw new Error(
-        `${h.pageErrors} page error(s): ${logText(r)
-          .split('\n')
-          .filter((l) => l.includes('page: error'))
-          .join(' / ')}`
-      );
-    return `${h.pages} page(s) on the live line, no errors`;
+    const errors = logText(r)
+      .split('\n')
+      .filter((l) => l.includes('page: error'));
+    if (errors.length) throw new Error(`${errors.length} page error(s): ${errors.join(' / ')}`);
+    return 'no page: error line in the log';
   });
+  // Both sides log where they are: the shell's launch line, and in the app the
+  // office's own `office: port <n>, home <folder>` line (hooks.server.ts).
+  // Required once the office writes that line; builds before NEW-1694 do not.
+  const lines = logText(r).split('\n');
+  const officeLine = lines.filter((l) => /^(?:\S+Z )?office: port \d+, home /.test(l)).at(-1);
+  await step(
+    'the shell and the office agree on the port and the home folder',
+    officeLine !== undefined,
+    () => {
+      const launch = lines.filter((l) => l.includes('opening: pid')).at(-1);
+      const shell = launch?.match(/, port (\d+), home (.+?), webview /);
+      if (!shell) throw new Error(`no launch line with a port and a home: ${launch ?? '(none)'}`);
+      const office = officeLine?.match(/^(?:\S+Z )?office: port (\d+), home (.+)$/);
+      if (!office) throw new Error('no office: port line in the log');
+      const said = {
+        shell: { port: shell[1], home: shell[2] },
+        office: { port: office[1], home: office[2].trim() }
+      };
+      for (const [who, s] of Object.entries(said))
+        if (s.port !== String(PORT) || s.home !== r.home)
+          throw new Error(
+            `the ${who} says port ${s.port} and home ${s.home}; the run set port ${PORT} and home ${r.home}`
+          );
+      return `port ${PORT} and home ${r.home}, in the shell's launch line and the office's own`;
+    }
+  );
   await step('a screenshot', false, () => screenshot(join(OUT, 'screen.png')));
   await step('quits with Node and both ports gone', true, async () => {
     if (stopDriven) return `${await stopDriven()}; the relaunches quit with SIGTERM`;
@@ -598,10 +731,7 @@ async function smokeApp(): Promise<void> {
     for (let i = 1; i <= relaunches; i++) {
       const again = launch(exe, r);
       times.push(await ready(again, r));
-      if (i === 1) {
-        const setup = await getJson<{ welcomed?: boolean }>('/api/setup', 90);
-        if (!setup.welcomed) throw new Error('it forgot the onboarding');
-      }
+      // Its data is checked on the staged server (--stage), which this run can give a key.
       await quit(again, r);
     }
     return `starts (ms): ${times.join(', ')}`;

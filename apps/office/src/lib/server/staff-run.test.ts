@@ -25,17 +25,16 @@ import {
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { setTimeout as wait } from 'node:timers/promises';
 import { mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { McpServer } from './launch.ts';
-import postgres from 'postgres';
 import {
   L,
   PATCH,
   agents,
   assertKeychainUntouched,
   awayFromHome,
+  bus,
   currentOffice,
   filesOf,
   gave,
@@ -148,7 +147,14 @@ test('a twin pair of access asks starts one carry-out, on the hand-off twin, tol
     [twin.ask.id]
   );
   const task = await L.giveTask('cleo', { title: 'Pick a label', why: 'w', steps: ['Pick one.'] });
-  const run = await runOf(carries[0].id, twin.ask.id);
+  // The floor shows the carry-out as serving the hand-off, so the giver's chat reads Cleo back on it while it goes.
+  const serving = new Set<number | undefined>();
+  const seen = (e: { type: string; inProgress?: Record<string, { handOffId?: number }[]> }) => {
+    if (e.type === 'working') for (const w of e.inProgress?.cleo ?? []) serving.add(w.handOffId);
+  };
+  bus.on('event', seen);
+  const run = await runOf(carries[0].id, twin.ask.id).finally(() => bus.off('event', seen));
+  assert.deepEqual([...serving], [h.id]);
   assert.ok(
     run.system.includes(
       `This also answers your ask #${firstDay.ask.id}, which another of your runs raised for the same tool: do that work once, here.`
@@ -260,7 +266,7 @@ test('a run stuck before its tool starts ends at its time limit, saying where it
   // Opening the run's tools reads the Odd's lessons: a lock on them holds the
   // run while it gets ready, as a hung database or embedding once held a chat.
   // On a connection of its own, since the held run takes the ledger's.
-  const pg = postgres(process.env.DATABASE_URL!, { max: 2, onnotice: () => {} });
+  const pg = L.openPool(L.DATABASE_URL, { max: 2, onnotice: () => {} });
   const lock = await pg.reserve();
   const events: { type: string; message?: string }[] = [];
   try {
@@ -955,35 +961,31 @@ test('Grok runs starting together share one renewal of their sign-in', async () 
   });
 });
 
-test('a renewal that hangs and ignores SIGTERM is killed at 30 seconds, and the run goes on', async (t) => {
+test('a renewal that hangs and ignores SIGTERM is killed at 30 seconds, and the run goes on', async () => {
   const { grokSignedOut } = await import('./grok.ts');
   const hang = join(folder, 'accounts', 'grok', 'office', 'hang.pid');
   // 0 until grok models starts; process.kill reads 0 as this whole process group.
   const pid = () => Number(readFileSync(hang, 'utf8'));
+  // Real time, not a mock clock: the renewal's limit is probe's, which is
+  // execFile's own timer, and a mock clock cannot reach that.
   await withGrokSignIn({ auth: 12 * 60_000 }, async () => {
     writeFileSync(hang, '');
-    // The office's 30 seconds pass on a mock clock, while grok models runs
-    // for real. The test's own waits are timers/promises, which stays real.
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    let ended = false;
-    const renewal = grokSignedOut(5 * 60_000).finally(() => (ended = true));
+    let timer: NodeJS.Timeout | undefined;
     try {
-      for (let i = 0; i < 500 && !(pid() > 0); i++) await wait(20);
-      assert.ok(pid() > 0, 'grok models never started');
-      t.mock.timers.tick(29_999);
-      // Long enough for a killed grok models to be heard closing.
-      await wait(500);
-      assert.equal(ended, false, 'the renewal ended before 30 seconds');
-      t.mock.timers.tick(1);
-      const result = await Promise.race([
-        renewal.then((refused) => ({ refused })),
-        wait(10_000, undefined, { ref: false })
+      const started = Date.now();
+      const ended = await Promise.race([
+        grokSignedOut(5 * 60_000).then((refused) => ({ refused })),
+        new Promise<false>((stop) => (timer = setTimeout(() => stop(false), 40_000)))
       ]);
-      assert.ok(result, 'the renewal was still going 10 seconds after its 30');
+      const took = Date.now() - started;
+      assert.ok(ended, 'the renewal was still going at 40 seconds');
       // The sign-in still has 12 minutes, so the killed renewal refuses nothing.
-      assert.equal(result.refused, undefined, 'the run was refused after its renewal was killed');
+      assert.equal(ended.refused, undefined, 'the run was refused after its renewal was killed');
+      assert.ok(took >= 29_000 && took < 35_000, `the renewal ended after ${took} ms`);
+      assert.ok(pid() > 0, 'grok models never started');
       assert.throws(() => process.kill(pid(), 0), { code: 'ESRCH' }, 'grok models still runs');
     } finally {
+      clearTimeout(timer);
       try {
         if (pid() > 0) process.kill(pid(), 'SIGKILL');
       } catch {
@@ -1666,7 +1668,7 @@ test("the run a finished task starts is told where a file attached from a goal's
     select id from follow_ups where task_id = ${task.id} and kind = 'task_done'`;
   const f = await L.startFollowUp(row.id);
   assert.ok(f, 'the task_done follow-up could not start');
-  const r = await followThrough(f, undefined, undefined, task);
+  const r = await followThrough(f, undefined, task);
   assert.equal(r.outcome, 'done', r.text);
   const { message, system } = JSON.parse(r.text) as Gave;
   assert.ok(
@@ -1690,7 +1692,6 @@ test("a lead woken by a colleague's tell_lead is told the work is its to decide 
   const told = await L.tellLead({
     staffId: 'paige',
     threadId: h.thread,
-    owner: 'Sam',
     said,
     words: said,
     reading: 'They want red paint.'
@@ -1700,9 +1701,13 @@ test("a lead woken by a colleague's tell_lead is told the work is its to decide 
     select id from follow_ups where staff_id = 'lead' and kind = 'resume' and thread_id = ${h.thread}`;
   assert.ok(wake, 'tell_lead woke no pick-up');
   const { system } = await runOf(wake.id);
-  assert.match(
-    system,
-    /- Paige passed you what Sam told them in chat about this work\. You decide what comes of it and hand on any work it needs; Paige does nothing more with it\. Sam's words: Make the barn red\. Paige's own reading, which is not Sam's words: They want red paint\./
+  // The note names the owner as the office does, by the name they gave.
+  const owner = await L.ownerName();
+  assert.ok(
+    system.includes(
+      `- Paige passed you what ${owner} told them in chat about this work. You decide what comes of it and hand on any work it needs; Paige does nothing more with it. ${owner}'s words: Make the barn red. Paige's own reading, which is not ${owner}'s words: They want red paint.`
+    ),
+    system
   );
 });
 
@@ -1949,7 +1954,7 @@ test("an Odd signs in through the account it is on: its own folder for each, the
   }
 });
 
-test("a new hire's first day and the manager's planning say how an Odd gets Run commands or Browse the web, the planning says where a level is raised, and a lesson never does", async () => {
+test("a new hire's first day and the manager's planning say how an Odd gets Run commands or Browse the web, the planning has each Odd ask for its own level and office tools, and a lesson never does", async () => {
   await L.startFirstDay('sam');
   const [day] = await L.pg<{ id: number }[]>`
     select id from follow_ups where staff_id = 'sam' and kind = 'first_day' order by id desc limit 1`;
@@ -1957,7 +1962,7 @@ test("a new hire's first day and the manager's planning say how an Odd gets Run 
   const firstText = `${first.system}\n${first.message}`;
   assert.ok(
     firstText.includes(
-      `3. If a tool you need is not in my_access, ask for it with ask_for_access. For Run commands or Browse the web, ask with ask_for_switch when my_access says ${await L.ownerName()} can switch it on.`
+      `4. If a tool you need is not in my_access, ask for it with ask_for_access. For Run commands or Browse the web, ask with ask_for_switch when my_access says ${await L.ownerName()} can switch it on.`
     ),
     firstText
   );
@@ -1974,14 +1979,15 @@ test("a new hire's first day and the manager's planning say how an Odd gets Run 
     insert into follow_ups (staff_id, kind, goal_id) values ('sam', 'goal', ${g.id}) returning id`;
   const f = await L.startFollowUp(row.id);
   assert.ok(f, 'the planning run could not start');
-  const r = await followThrough(f, undefined, undefined, undefined, await L.goal(g.id));
+  const r = await followThrough(f, undefined, undefined, await L.goal(g.id));
   assert.equal(r.outcome, 'done', r.text);
   const plan = JSON.parse(r.text) as Gave;
   const planText = `${plan.system}\n${plan.message}`;
   const owner = await L.ownerName();
+  // The Odd asks for a level or an office tool itself, so the plan never hands the owner steps for one.
   assert.ok(
     planText.includes(
-      "put any level raise in owner_steps, as a step on that Odd's Settings tab, under Model. Have the Odd ask"
+      'Never put a level raise or an office tool in owner_steps: the Odd asks for it itself with ask_for_level or ask_for_office_tool when its part needs it.'
     ),
     planText
   );

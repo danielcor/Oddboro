@@ -16,7 +16,7 @@ import {
 import { type GoalView } from './goals.ts';
 import { goalWhen, HEALTH_WORDS, HORIZONS, STATUS_WORDS } from './goal-words.ts';
 import { handsOff } from './capabilities.ts';
-import { LEVELS } from './access-words.ts';
+import { LEVELS, parseLevel } from './access-words.ts';
 import { type CarriedFile } from './hand-offs.ts';
 import { MANAGER_ROLE } from './managers.ts';
 import { type OwnerWords } from './lessons.ts';
@@ -36,6 +36,7 @@ import {
 import { home, isOfficeFile, isWhereNamed } from './home.ts';
 import { trustSystemCertificates } from './certificates.ts';
 import { advancedMode, projectConnections } from './project-sessions.ts';
+import { skillsOf } from './staff-skills.ts';
 
 trustSystemCertificates();
 const ME = process.env.STAFF_ID ?? '';
@@ -75,6 +76,7 @@ const RUN: ToolRun = {
     (await advancedMode()) &&
     (await projectConnections(ME)).length > 0,
   write: held.some((g) => g.level === 'act'),
+  skills: (await skillsOf(ME)).length > 0,
   chat: OWNER_SAID !== undefined,
   manager: me.role === MANAGER_ROLE
 };
@@ -109,11 +111,16 @@ const APPROVED_ASK = Number(process.env.APPROVED_ASK) || undefined;
  */
 const HAND_OFF_ID = Number(process.env.HAND_OFF_ID) || undefined;
 /**
+ * The level this run works at most, set by the office when it is below the
+ * Odd's own. my_access reads it from the env (`accessInRun`).
+ */
+const CEILING = parseLevel(process.env.CEILING);
+/**
  * The thread this run works on, either side, set by the office. Asks and tasks
  * it raises carry it. The hub's runs hand off into it and may park it.
  */
 const THREAD_ID = Number(process.env.THREAD_ID) || undefined;
-/** Set by the office for every run: a thread it puts work on keeps it (`keepRun`, `runsGoing`). */
+/** Set by the office for every run: a thread it puts work on keeps it (`keepRun` in work/hand-offs.ts, `runsGoing`). */
 const RUN_KEY = process.env.RUN_KEY || undefined;
 /**
  * Set by the office for a run that only reads the owner's reason or edit for a
@@ -626,6 +633,8 @@ export {
   mailboxes,
   offered,
   OWNER_WORDS,
+  HAND_OFF_ID,
+  CEILING,
   THREAD_ID,
   RUN_KEY,
   VIA,

@@ -3,13 +3,15 @@
   import type { Check } from '@oddboro/ledger/checks';
   import AccountSection from './AccountSection.svelte';
   import AdvancedSection from './AdvancedSection.svelte';
+  import BackupSection from './BackupSection.svelte';
   import { AgentTools } from './agent-tools.svelte.ts';
   import { call } from './api.ts';
   import DiagnosticsSection from './DiagnosticsSection.svelte';
   import OfficeTools from './OfficeTools.svelte';
+  import SearchDownload from './SearchDownload.svelte';
   import { selectOnFocus } from './select-on-focus.ts';
   import UpdatesSection from './UpdatesSection.svelte';
-  import { shown } from './diagnostics.svelte.ts';
+  import WeatherSection from './WeatherSection.svelte';
 
   // The office's first screen for a new owner, and its Setup window after:
   // the name staff call them, the office they work in, their first staffer,
@@ -29,6 +31,8 @@
   let { office, welcomed, ondesign, onhire, onmeet, ondone, notify, onnotify }: Props = $props();
 
   type Setup = {
+    app: boolean;
+    ownDatabase: boolean;
     checks: Check[];
     owner: string;
     zoneName: string;
@@ -188,10 +192,12 @@
 
     {#if welcomed}
       <UpdatesSection />
-      {#if shown()}
-        <DiagnosticsSection />
-      {/if}
+      <WeatherSection />
+      <DiagnosticsSection />
       <AccountSection />
+      {#if setup}
+        <BackupSection app={setup.app} ownDatabase={setup.ownDatabase} />
+      {/if}
       <AdvancedSection />
     {/if}
 
@@ -214,14 +220,21 @@
           </p>
         {/if}
         <ul class="flex flex-col gap-1">
-          {#each setup.checks as c (c.id)}
+          {#each setup.checks as c, i (c.id)}
             <li class="rounded-lg bg-raise px-2.5 py-1.5 text-xs">
               <div class="flex gap-2">
                 <span class="w-3 {TONE[c.state]}" aria-label={c.state}>{MARK[c.state]}</span>
                 <span class="w-24 shrink-0 text-ink">{c.name}</span>
                 <span class="min-w-0 flex-1 text-muted">{c.found}</span>
               </div>
-              {#if c.fix && c.state !== 'ok'}
+              {#if c.download}
+                <div class="ms-5 mt-1">
+                  <SearchDownload
+                    check={c}
+                    ondone={(done) => setup && (setup.checks = setup.checks.with(i, done))}
+                  />
+                </div>
+              {:else if c.fix && c.state !== 'ok'}
                 <p class="ms-5 mt-1 text-faint">{@render words(c.fix)}</p>
               {/if}
             </li>

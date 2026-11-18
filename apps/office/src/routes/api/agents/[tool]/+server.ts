@@ -16,16 +16,17 @@
 import { error, json } from '@sveltejs/kit';
 import {
   currentPlatform,
+  currentSystem,
   account as accountRow,
   AGENT_NAMES,
   OFFICE_ACCOUNT,
   offeredAgent,
   type Agent
 } from '@oddboro/ledger';
+import { computerWord } from '@oddboro/ledger/system-words';
 import {
   claudeSignIn,
   claudeSignInState,
-  computerWord,
   installEnv,
   npmMissing,
   SIGN_INS,
@@ -73,7 +74,8 @@ export const POST: RequestHandler = async ({ params, request }) => {
   const account = await accountFor(tool, b.account);
   if (b.action === 'sign-in') {
     const command = agentCommand(tool);
-    if (!command) error(400, `${name} is not on this ${computerWord()}. Install it first.`);
+    if (!command)
+      error(400, `${name} is not on this ${computerWord(currentSystem())}. Install it first.`);
     const s = tool === 'claude' ? undefined : SIGN_INS[tool];
     if (s?.how === 'key') error(400, `${name} takes an API key.`);
     const [cmd, before] = command;
@@ -97,7 +99,7 @@ export const POST: RequestHandler = async ({ params, request }) => {
   }
   if (b.action === 'update') {
     if (!agentCommand(tool))
-      error(400, `${name} is not on this ${computerWord()}. Install it first.`);
+      error(400, `${name} is not on this ${computerWord(currentSystem())}. Install it first.`);
     const u = updateCommand(tool);
     return SLOTS[tool].start('update', u.cmd, u.args, u.env ?? installEnv());
   }

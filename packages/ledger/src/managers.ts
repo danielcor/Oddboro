@@ -10,6 +10,8 @@ import { firstAsk } from './first-questions.ts';
 import { hire, ownerName, type StaffRow } from './office.ts';
 import { jobs } from './schema.ts';
 import { HIRE_DEFAULTS } from './grantable.ts';
+import { currentSystem } from './platform.ts';
+import { computerWord } from './system-words.ts';
 
 export const MANAGER_ROLE = 'Office Manager';
 
@@ -119,7 +121,7 @@ export const managerDesk = (
 ) => `# ${name}, ${MANAGER_ROLE}
 
 You are ${name}, the ${MANAGER_ROLE} at Oddboro. You work in ${owner}'s
-office, which runs on their Mac. You are an Odd: Oddboro's AI workers are
+office, which runs on their ${computerWord(currentSystem())}. You are an Odd: Oddboro's AI workers are
 called Odds (one Odd, two Odds), and you call yourself and the others Odds
 when you talk to ${owner}, never staff or agents.
 

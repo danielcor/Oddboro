@@ -571,34 +571,65 @@ test('a folder given by ~ or through a link is stored by its real path and recor
   });
 });
 
-test('a folder inside or holding one the Odd has is refused; a level change and a removal are not', async () => {
+test('a folder to read inside one to change is refused either way round; a level change and a removal are not', async () => {
   await setOwn('wes', {});
   await ownerHome(async (home) => {
     for (const p of ['shed/tools', 'barn/loft']) mkdirSync(join(home, p), { recursive: true });
     const real = (p: string) => realpathSync(join(home, p));
-    const nested = { status: 400, message: L.FOLDER_REFUSED.nested };
-    assert.equal((await patch('wes', { folder: '~/shed', access: 'read' })).status, 200);
-    assert.deepEqual(
-      await refusal(patch('wes', { folder: '~/shed/tools', access: 'write' })),
-      nested
-    );
-    assert.equal((await patch('wes', { folder: '~/barn/loft', access: 'write' })).status, 200);
-    assert.deepEqual(await refusal(patch('wes', { folder: '~/barn', access: 'read' })), nested);
-    // The same folder at another level replaces it.
+    const refused = { status: 400, message: L.FOLDER_REFUSED.readInsideChange };
     assert.equal((await patch('wes', { folder: '~/shed', access: 'write' })).status, 200);
+    assert.deepEqual(
+      await refusal(patch('wes', { folder: '~/shed/tools', access: 'read' })),
+      refused
+    );
+    assert.equal((await patch('wes', { folder: '~/barn/loft', access: 'read' })).status, 200);
+    assert.deepEqual(await refusal(patch('wes', { folder: '~/barn', access: 'write' })), refused);
+    // The same folder at another level replaces it.
+    assert.equal((await patch('wes', { folder: '~/shed', access: 'read' })).status, 200);
     assert.deepEqual((await L.staffer('wes'))?.folders, [
-      { path: real('barn/loft'), write: true },
-      { path: real('shed'), write: true }
+      { path: real('barn/loft'), write: false },
+      { path: real('shed'), write: false }
     ]);
     // Folders that nest from before are each still taken back.
     await setOwn('wes', {
       folders: [
-        { path: real('shed'), write: false },
-        { path: real('shed/tools'), write: true }
+        { path: real('shed'), write: true },
+        { path: real('shed/tools'), write: false }
       ]
     });
     assert.equal((await patch('wes', { folder: real('shed/tools'), access: null })).status, 200);
-    assert.deepEqual((await L.staffer('wes'))?.folders, [{ path: real('shed'), write: false }]);
+    assert.deepEqual((await L.staffer('wes'))?.folders, [{ path: real('shed'), write: true }]);
+  });
+});
+
+test('on the Settings tab a folder to change goes inside one to read in either order, each added at read first', async () => {
+  await setOwn('wes', {});
+  await ownerHome(async (home) => {
+    for (const p of ['shed/tools', 'barn/loft']) mkdirSync(join(home, p), { recursive: true });
+    const real = (p: string) => realpathSync(join(home, p));
+    const refused = { status: 400, message: L.FOLDER_REFUSED.readInsideChange };
+    // Outer first: the tab adds the inner one at read, then it is switched to write.
+    assert.equal((await patch('wes', { folder: '~/shed', access: 'read' })).status, 200);
+    assert.equal((await patch('wes', { folder: '~/shed/tools', access: 'read' })).status, 200);
+    assert.equal((await patch('wes', { folder: '~/shed/tools', access: 'write' })).status, 200);
+    // Inner first.
+    assert.equal((await patch('wes', { folder: '~/barn/loft', access: 'read' })).status, 200);
+    assert.equal((await patch('wes', { folder: '~/barn/loft', access: 'write' })).status, 200);
+    assert.equal((await patch('wes', { folder: '~/barn', access: 'read' })).status, 200);
+    assert.deepEqual((await L.staffer('wes'))?.folders, [
+      { path: real('shed'), write: false },
+      { path: real('shed/tools'), write: true },
+      { path: real('barn/loft'), write: true },
+      { path: real('barn'), write: false }
+    ]);
+    assert.ok(await recorded('Let Wes read and change ~/shed/tools'));
+    // Switching the inner one back to read inside an outer one to change is refused.
+    assert.equal((await patch('wes', { folder: '~/shed', access: 'write' })).status, 200);
+    assert.deepEqual(
+      await refusal(patch('wes', { folder: '~/shed/tools', access: 'read' })),
+      refused
+    );
+    assert.equal((await L.staffer('wes'))?.folders.length, 4);
   });
 });
 

@@ -4,6 +4,7 @@
   // who it is for. A guess dropped unkept, or one undone, can still be kept
   // after all.
   import type { LessonLine, LessonUse } from '@oddboro/ledger';
+  import { OPEN_LESSON } from '@oddboro/ledger/lesson-rules';
   import { call } from './api.ts';
   import { when } from './format.ts';
 
@@ -23,7 +24,8 @@
     changed = undefined;
   });
   const l = $derived(changed ?? lesson);
-  const open = $derived(l.status === 'live' || l.status === 'waiting');
+  // A shown lesson can also read `dropped`, a state no stored row holds, so match by value.
+  const open = $derived(OPEN_LESSON.some((s) => s === l.status));
   /** A lesson the Odd guessed, still waiting for the owner's Keep or dropped unkept. */
   const guess = $derived(l.status === 'waiting' || l.status === 'dropped');
 

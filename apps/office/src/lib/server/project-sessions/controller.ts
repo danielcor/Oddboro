@@ -6,6 +6,7 @@ import type { FSWatcher } from 'node:fs';
 import {
   connectProject,
   claimProject,
+  nextProjectRequest,
   changeProjectRequest,
   finishProject,
   projectConnections,
@@ -21,6 +22,7 @@ import { projectFolder, projectInput, UUID } from './native.ts';
 import {
   claudeProjects,
   prepareClaude,
+  checkClaudeReceiver,
   postClaude,
   clearClaude,
   correctClaude,
@@ -59,6 +61,7 @@ type Runtime = {
   plugin?: string;
   openingTerminal?: Promise<ProjectTerminal>;
   busy?: Promise<void>;
+  arrival?: ReturnType<typeof setTimeout>;
   tail: Promise<void>;
 };
 type View = {
@@ -289,10 +292,14 @@ export class ProjectController {
           s,
           async (id, answer) => {
             if (answer === undefined) {
-              await changeProjectRequest(id, s.id, ['sending'], 'working');
+              if (await changeProjectRequest(id, s.id, ['sending'], 'working')) {
+                clearTimeout(c.arrival);
+                c.note = 'Claude is working';
+              }
             } else if (typeof answer === 'string' && answer.length <= 100000) {
               const finished = await finishProject(id, s.id, answer);
               if (!finished) return;
+              clearTimeout(c.arrival);
               clearClaude(s, id);
               if (c.request?.id === id) c.request = undefined;
               c.reply = answer;
@@ -318,6 +325,7 @@ export class ProjectController {
               answer:
                 'Claude closed before the office received its answer. Inspect the conversation.'
             });
+          else if (c.request.state === 'sending') this.waitForClaude(c, c.request.id);
           c.note = 'Inspect the native conversation before sending more work.';
         }
       } else {
@@ -368,6 +376,7 @@ export class ProjectController {
       await this.pump(c);
       return c;
     } catch (e) {
+      clearTimeout(c.arrival);
       c.watch?.close();
       this.sessions.delete(s.id);
       throw e;
@@ -426,6 +435,7 @@ export class ProjectController {
     )
       throw new Error('That request does not need reconciliation.');
     if (c.session.agent === 'claude') clearClaude(c.session, key);
+    clearTimeout(c.arrival);
     c.request = undefined;
     await this.pump(c);
     this.changed(c);
@@ -446,8 +456,39 @@ export class ProjectController {
     return c.busy;
   }
   private async dispatch(c: Runtime) {
+    const before = c.note;
+    if (c.session.agent === 'claude') {
+      const next = await nextProjectRequest(c.session.id);
+      if (!next) return;
+      c.note = 'Checking Claude’s office connection';
+      this.changed(c);
+      try {
+        await this.terminal(c.session.id);
+        await checkClaudeReceiver(c.session);
+      } catch (e) {
+        // No offer has been written: retry can safely use the same saved request.
+        const failed = await changeProjectRequest(
+          next.id,
+          c.session.id,
+          ['queued', 'authorized'],
+          'failed',
+          { answer: message(e) }
+        );
+        if (failed) c.note = message(e);
+        this.changed(c);
+        return;
+      }
+      if (!c.connected) return;
+    }
     const r = await claimProject(c.session.id);
-    if (!r) return;
+    if (!r) {
+      // The claim sent nothing, so the readiness note no longer applies.
+      if (c.note !== before) {
+        c.note = before;
+        this.changed(c);
+      }
+      return;
+    }
     c.request = r;
     c.reply = '';
     c.note = 'Sending assignment';
@@ -455,9 +496,9 @@ export class ProjectController {
     try {
       const content = await projectInput(c.session.folder, r.prompt, r.file);
       if (c.session.agent === 'claude') {
-        await this.terminal(c.session.id);
         postClaude(c.session, { ...r, prompt: content.text });
         c.note = 'Waiting for Claude to take the assignment';
+        this.waitForClaude(c, r.id);
       } else {
         const { turn } = await (
           await this.codex(c.socket)
@@ -478,6 +519,22 @@ export class ProjectController {
       c.note = message(e);
     }
     this.changed(c);
+  }
+  /** An offered assignment may have reached Claude. Never resend it on a timeout. */
+  private waitForClaude(c: Runtime, id: string) {
+    clearTimeout(c.arrival);
+    c.arrival = setTimeout(() => {
+      const answer =
+        'Claude has not acknowledged this assignment. Check its terminal for a trust, sign-in or plugin prompt before clearing it. Nothing will be sent again automatically.';
+      void changeProjectRequest(id, c.session.id, ['sending'], 'uncertain', { answer })
+        .then((row) => {
+          if (!row) return;
+          c.note = answer;
+          this.changed(c);
+        })
+        .catch((e) => this.warn(c, e));
+    }, 60_000);
+    c.arrival.unref();
   }
   private receive(socket: string, m: RpcMessage) {
     const p = m.params ?? {};
@@ -570,6 +627,7 @@ export class ProjectController {
     if (!c.request || c.request.id !== expected)
       throw new Error('That assignment is no longer active.');
     clearClaude(c.session, expected);
+    clearTimeout(c.arrival);
     c.terminal?.write('\x1b');
     await changeProjectRequest(expected, id, ['sending', 'working'], 'uncertain', {
       answer:
@@ -612,6 +670,7 @@ export class ProjectController {
     if (c.request || c.turn)
       throw new Error('Finish or stop the active work before disconnecting.');
     c.connected = false;
+    clearTimeout(c.arrival);
     c.watch?.close();
     await c.terminal?.releaseProcess();
     this.sessions.delete(id);

@@ -4,13 +4,14 @@
 // run this way, so a new office with nobody on staff can still hire its first
 // staffer. Usage is recorded with no staffer.
 //
-// On Claude Code the run has no tools, its pictures go in the message itself,
-// and Claude Code keeps no transcript, so a headshot never lands on disk. On
-// Grok or Codex it goes through the same launch an Odd's run does (`LAUNCHES`
-// in cli.ts), with that tool's sandbox, in a folder of its own that reads
-// nothing else, writes only itself, has no MCP, no web and no network, and is
-// removed when the run ends, pictures and all. Neither has a shell or a tool
-// that reads files: the pictures go in with the message.
+// Every tool's run goes through the same launch an Odd's run does
+// (`LAUNCHES` in cli.ts). On Claude Code the run has no tools, its pictures
+// go in the message itself, from memory, and Claude Code keeps no
+// transcript, so a headshot never lands on disk. On Grok or Codex it runs
+// with that tool's sandbox, in a folder of its own that reads nothing else,
+// writes only itself, has no MCP, no web and no network, and is removed when
+// the run ends, pictures and all. Neither has a shell or a tool that reads
+// files: the pictures go in with the message.
 import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,13 +25,13 @@ import {
   reserveRun,
   releaseRun,
   type Agent,
-  type ModelUsage,
   type UsageKind
 } from '@oddboro/ledger';
-import { notePlan, pluginsOff, staffEnv } from './staff.ts';
-import { claudeInput, claudeRunHome, modelArgs, spawnClaude } from './claude.ts';
+import { notePlan } from './staff.ts';
+import { claudeRunHome, type ClaudeRun } from './claude.ts';
 import { endedEarly, LAUNCHES, stoppedWhy } from './cli.ts';
-import { SIGN_IN_WHERE, stopGroups, type RunImage } from './launch.ts';
+import { drive, ownsGroup, type RunEnd, type Sink } from './drive.ts';
+import { SIGN_IN_WHERE, type RunImage } from './launch.ts';
 import { agentCommand } from './agent-sign-in.ts';
 import { tooOldLine } from './versions.ts';
 
@@ -78,7 +79,7 @@ export async function runAsOffice(message: string, opts: OfficeRunOpts): Promise
   try {
     const said = { ...opts, system: say(opts.system), signal: live.stop.signal, runId: live.key };
     if (said.signal.aborted) return { ok: false, text: STOPPED };
-    return await (agent === 'claude' ? run(say(message), said) : runOn(agent, say(message), said));
+    return await runOn(agent, say(message), said);
   } finally {
     opts.signal?.removeEventListener('abort', cancel);
     releaseRun(live);
@@ -97,222 +98,164 @@ const ONE_REPLY =
 /** Where an office run's refusal sends the owner to sign its tool in: setup, not an Odd's Settings tab. */
 const SIGN_IN_HERE = 'in Setup, under Your AI';
 
-/** Call `stop` once when `signal` aborts, at once if it already has. */
-function onStop(signal: AbortSignal | undefined, stop: () => void): void {
-  if (!signal) return;
-  if (signal.aborted) stop();
-  else signal.addEventListener('abort', stop, { once: true });
-}
-
-/** One office run on Grok or Codex. */
-async function runOn(
-  agent: Exclude<Agent, 'claude'>,
-  message: string,
+/**
+ * Where an office run works, and how its pictures reach its tool. Claude Code
+ * takes them in its message, from memory, so a headshot never lands on disk,
+ * and works in the office's folder. Grok and Codex open them as files, in a
+ * folder of the run's own, removed when the run ends (`clear`).
+ */
+async function workspace(
+  agent: Agent,
+  key: string,
   opts: OfficeRunOpts
-): Promise<OfficeRun> {
+): Promise<{
+  dir: string;
+  clear: () => void;
+  run: Pick<ClaudeRun, 'system' | 'images' | 'pictures' | 'model' | 'toolDir'>;
+}> {
+  if (agent === 'claude') {
+    mkdirSync(HOME, { recursive: true });
+    return {
+      dir: HOME,
+      clear: () => {},
+      run: {
+        system: opts.system,
+        pictures: opts.images,
+        ...(opts.model ? { model: opts.model } : {}),
+        // The office's own Claude Code folder, or the owner's login before it is signed in.
+        toolDir: await claudeRunHome(OFFICE_ACCOUNT)
+      }
+    };
+  }
   mkdirSync(RUNS, { recursive: true, mode: 0o700 });
-  const key = opts.runId!; // runAsOffice reserves the entry before launch.
   const dir = join(RUNS, key);
   mkdirSync(dir, { mode: 0o700 });
-  const clear = () => rmSync(dir, { recursive: true, force: true });
   const images = (opts.images ?? []).map((img, i): RunImage => {
     const path = join(dir, `picture-${i + 1}.${img.mediaType.split('/')[1] || 'png'}`);
     writeFileSync(path, Buffer.from(img.data, 'base64'), { mode: 0o600 });
     return { path, mediaType: img.mediaType };
   });
-  const launch = await LAUNCHES[agent]({
-    key,
-    // The office's own runs sign in with each tool's Office account.
-    account: OFFICE_ACCOUNT,
-    staffId: 'office',
+  return {
     dir,
-    reads: [],
-    // `part` gives Grok a sandbox profile for this run alone.
-    part: dir,
-    writes: [dir],
-    granted: [],
-    web: false,
-    commands: false,
-    network: false,
-    system: `${opts.system}\n\n${ONE_REPLY}`,
-    input: message,
-    servers: {},
-    allowed: [],
-    timeoutMs: opts.timeoutMs,
-    images,
-    bare: true,
-    ...(opts.effort ? { effort: opts.effort } : {})
-  });
-  if ('refused' in launch) {
-    clear();
-    return { ok: false, text: launch.refused.replace(SIGN_IN_WHERE, SIGN_IN_HERE) };
-  }
-  const tool = AGENT_NAMES[agent];
-  return new Promise((done) => {
-    const [cmd, before] = agentCommand(agent) ?? [agent, []];
-    const child = spawn(cmd, [...before, ...launch.args], {
-      cwd: dir,
-      env: launch.env,
-      detached: !!launch.ownGroup,
-      windowsHide: true
-    });
-    const stop = () => {
-      if (!launch.ownGroup) child.kill();
-      else if (child.pid) stopGroups(child.pid);
-    };
-    let buffer = '';
-    let stderr = '';
-    /** The last whole message, which is a Codex run's reply. */
-    let last = '';
-    let finished = false;
-    const finish = (r: OfficeRun) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      launch.done();
-      clear();
-      done(r);
-    };
-    const timer = setTimeout(() => {
-      stop();
-      finish({ ok: false, text: `No reply after ${opts.timeoutMs / 60_000} minutes.` });
-    }, opts.timeoutMs);
-    onStop(opts.signal, () => {
-      stop();
-      finish({ ok: false, text: STOPPED });
-    });
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk;
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        let e: Record<string, unknown>;
-        try {
-          e = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (launch.read) {
-          for (const ev of launch.read(e)) {
-            if (ev.type === 'message') last = ev.text;
-            else if (ev.type === 'usage')
-              void recordUsage(null, opts.kind, ev.usage).catch(() => {});
-            else if (ev.type === 'done') finish({ ok: true, text: last.trim() });
-            else if (ev.type === 'failed') finish({ ok: false, text: ev.message });
-            else if (ev.type === 'error') stderr += `${ev.message}\n`;
-          }
-          continue;
-        }
-        // Grok streams in Claude Code's shape.
-        if (e.type === 'result') {
-          if (e.modelUsage)
-            void recordUsage(null, opts.kind, e.modelUsage as ModelUsage).catch(() => {});
-          if (e.subtype === 'success') finish({ ok: true, text: String(e.result ?? '').trim() });
-          else finish({ ok: false, text: endedEarly(agent, e) });
-        }
-      }
-    });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (c: string) => (stderr += c));
-    child.on('error', (err) =>
-      finish({ ok: false, text: `Could not start ${tool}: ${err.message}` })
-    );
-    child.on('close', (code) => {
-      if (launch.ownGroup) stop();
-      finish({
-        ok: false,
-        text: stoppedWhy(agent, code, stderr, true)
-      });
-    });
-    // A run stopped before it read its message closes its input: the stop says so, not this.
-    child.stdin.on('error', () => {});
-    child.stdin.end(launch.stdin);
-  });
+    clear: () => rmSync(dir, { recursive: true, force: true }),
+    run: { system: `${opts.system}\n\n${ONE_REPLY}`, images }
+  };
 }
 
-async function run(message: string, opts: OfficeRunOpts): Promise<OfficeRun> {
-  mkdirSync(HOME, { recursive: true });
-  const args = [
-    '-p',
-    '--no-session-persistence',
-    '--output-format',
-    'stream-json',
-    '--verbose',
-    '--tools',
-    '',
-    '--strict-mcp-config',
-    '--mcp-config',
-    JSON.stringify({ mcpServers: {} }),
-    '--permission-mode',
-    'dontAsk',
-    '--disable-slash-commands',
-    '--settings',
-    JSON.stringify({ enabledPlugins: pluginsOff() }),
-    '--append-system-prompt',
-    opts.system,
-    ...(opts.effort ? ['--effort', opts.effort] : []),
-    ...(opts.model ? ['--model', opts.model] : modelArgs()),
-    ...(opts.images?.length ? ['--input-format', 'stream-json'] : [])
-  ];
-  // The office's own Claude Code folder, or the owner's login before it is signed in.
-  const env = staffEnv(await claudeRunHome(OFFICE_ACCOUNT));
-  return new Promise((done) => {
-    const child = spawnClaude(args, { cwd: HOME, env });
-    let buffer = '';
-    let finished = false;
-    const finish = (r: OfficeRun) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      done(r);
-    };
-    const timer = setTimeout(() => {
-      child.kill();
-      finish({ ok: false, text: `No reply after ${opts.timeoutMs / 60_000} minutes.` });
-    }, opts.timeoutMs);
-    onStop(opts.signal, () => {
-      child.kill();
-      finish({ ok: false, text: STOPPED });
+/** One office run, on the tool the office runs on. */
+async function runOn(
+  agent: Agent,
+  message: string,
+  opts: OfficeRunOpts & { runId: string; signal: AbortSignal }
+): Promise<OfficeRun> {
+  const place = await workspace(agent, opts.runId, opts);
+  try {
+    const launch = await LAUNCHES[agent]({
+      key: opts.runId,
+      // The office's own runs sign in with each tool's Office account.
+      account: OFFICE_ACCOUNT,
+      staffId: 'office',
+      dir: place.dir,
+      reads: [],
+      // `part` gives Grok a sandbox profile for this run alone.
+      part: place.dir,
+      writes: [place.dir],
+      granted: [],
+      web: false,
+      commands: false,
+      network: false,
+      input: message,
+      servers: {},
+      allowed: [],
+      timeoutMs: opts.timeoutMs,
+      bare: true,
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...place.run
     });
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk;
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        let e: Record<string, unknown>;
-        try {
-          e = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (e.type === 'rate_limit_event') void notePlan(e.rate_limit_info);
-        if (e.type === 'result') {
-          if (e.modelUsage)
-            void recordUsage(null, opts.kind, e.modelUsage as ModelUsage).catch(() => {});
-          if (e.subtype === 'success') finish({ ok: true, text: String(e.result ?? '').trim() });
-          else finish({ ok: false, text: `The run ended early (${String(e.subtype)}).` });
+    if ('refused' in launch)
+      return { ok: false, text: launch.refused.replace(SIGN_IN_WHERE, SIGN_IN_HERE) };
+    const [cmd, before] = agentCommand(agent) ?? [agent, []];
+    const sink: Sink = {
+      event: (e) => {
+        switch (e.type) {
+          case 'usage':
+            void recordUsage(null, opts.kind, e.usage).catch(() => {});
+            break;
+          case 'plan':
+            void notePlan(e.info);
+            break;
+          // An office run shows nothing as it goes.
+          case 'session':
+          case 'tool':
+          case 'message':
+          case 'delta':
+            break;
+          default: {
+            // The type check fails here until a new kind of event has its case.
+            const unheard: never = e;
+            console.error(`An office run has no case for ${JSON.stringify(unheard)}`);
+          }
         }
       }
-    });
-    let stderr = '';
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (c: string) => (stderr += c));
-    child.on('error', (err) =>
-      finish({ ok: false, text: `Could not start Claude Code: ${err.message}` })
+    };
+    const end = await drive(
+      () =>
+        spawn(cmd, [...before, ...launch.args], {
+          cwd: place.dir,
+          env: launch.env,
+          detached: ownsGroup(launch),
+          windowsHide: true
+        }),
+      launch,
+      sink,
+      { deadline: Date.now() + opts.timeoutMs, signal: opts.signal }
     );
-    child.on('close', (code) =>
-      finish({
-        ok: false,
-        text: `Claude Code stopped (exit ${code}). ${stderr.trim().split('\n').slice(-2).join(' ')}`
-      })
-    );
-    child.stdin.on('error', () => {});
-    child.stdin.end(claudeInput(message, opts.images));
-  });
+    return officeEnded(agent, end, opts.timeoutMs);
+  } finally {
+    place.clear();
+  }
+}
+
+/**
+ * What an office run says when its tool's run ends (`drive`). Claude Code's
+ * and Grok's runs read Claude Code's stream: a result that says it succeeded
+ * is the reply, even one that also says it erred, and with no result text the
+ * reply is empty, though Grok streams its text. Codex's and Gemini's reply is
+ * their last whole message.
+ */
+function officeEnded(agent: Agent, end: RunEnd, timeoutMs: number): OfficeRun {
+  switch (end.outcome) {
+    case 'done':
+      return {
+        ok: true,
+        text: (agent === 'claude' || agent === 'grok' ? (end.text ?? '') : end.spoken).trim()
+      };
+    case 'failed': {
+      const { why } = end;
+      if ('result' in why) {
+        if (why.result.subtype === 'success')
+          return { ok: true, text: (why.result.text ?? '').trim() };
+        return {
+          ok: false,
+          text:
+            agent === 'claude'
+              ? `The run ended early (${why.result.subtype}).`
+              : endedEarly(agent, why.result)
+        };
+      }
+      if ('tool' in why) return { ok: false, text: why.tool };
+      if ('exit' in why) return { ok: false, text: stoppedWhy(agent, why.exit, end.stderr, true) };
+      return { ok: false, text: `Could not start ${AGENT_NAMES[agent]}: ${why.start}` };
+    }
+    case 'timeout':
+      return { ok: false, text: `No reply after ${timeoutMs / 60_000} minutes.` };
+    case 'stopped':
+    case 'left':
+      return { ok: false, text: STOPPED };
+    default: {
+      // The type check fails here until a new way to end has its words.
+      const unworded: never = end;
+      return unworded;
+    }
+  }
 }

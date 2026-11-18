@@ -39,21 +39,33 @@ test('every run is told to ask which one when a name could be an Odd or someone 
 
 test("the office's Odds are listed by name, id and role, a persona's with where its words go, and what this Odd can do about them", () => {
   const odds = [
-    { id: 'marshall', name: 'Marshall', role: 'Office Manager', persona: false },
-    { id: 'nate', name: 'Nate', role: 'Advisor from New Altitude', persona: true }
+    {
+      id: 'marshall',
+      name: 'Marshall',
+      role: 'Office Manager',
+      remit: 'Keeps the editorial plan.',
+      persona: false
+    },
+    {
+      id: 'nate',
+      name: 'Nate',
+      role: 'Advisor from New Altitude',
+      remit: 'Reviews strategy.',
+      persona: true
+    }
   ];
   const can = whoIsHereSection(odds, true);
   assert.match(can, /^\n## Who's in the office\n/);
-  assert.match(can, /- Marshall \(marshall\): Office Manager\.\n/);
+  assert.match(can, /- Marshall \(marshall\): Office Manager\. Keeps the editorial plan\.\n/);
   assert.match(
     can,
-    /- Nate \(nate\): Advisor from New Altitude\. A persona: Nate's replies come from New Altitude, so what you give Nate leaves this computer\./
+    /- Nate \(nate\): Advisor from New Altitude\. Reviews strategy\. A persona: Nate's replies come from New Altitude, so what you give Nate leaves this computer\./
   );
   assert.match(can, /To give one of them work, call hand_off\./);
   const cannot = whoIsHereSection(odds, false);
   assert.match(
     cannot,
-    /You cannot hand them work\. When \{owner\} asks for something one of them should do, say so/
+    /You cannot hand them work\. If you need a colleague, name them and say that you lack hand-off access/
   );
   assert.doesNotMatch(cannot, /call hand_off/);
   assert.equal(whoIsHereSection([], true), '', 'alone in the office, nothing');

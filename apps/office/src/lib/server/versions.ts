@@ -9,9 +9,8 @@
 // The newest is asked of the tool's maker when a list is read, at most every
 // six hours: npm's registry for Claude Code, Codex and Gemini, and Grok's own
 // check for Grok. Only the package's name leaves the computer. Server only.
-import { execFile } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
-import { AGENT_NAMES, MIN_VERSIONS, olderThan, type Agent } from '@oddboro/ledger';
+import { AGENT_NAMES, MIN_VERSIONS, olderThan, probe, type Agent } from '@oddboro/ledger';
 import { agentCommand } from './agent-sign-in.ts';
 import { cleanEnv } from './claude.ts';
 import { grokLatest, grokUpdate } from './grok.ts';
@@ -48,19 +47,23 @@ export async function versionOf(agent: Agent): Promise<string | undefined> {
   const stamp = stampOf(cmd, before);
   const was = read.get(agent);
   if (was?.stamp === stamp) return was.version;
-  const version = await new Promise<string | undefined>((done) => {
-    try {
-      execFile(
-        cmd,
-        [...before, '--version'],
-        { env: cleanEnv(), timeout: 15_000, windowsHide: true },
-        (_e, out) => done(VERSION.exec(String(out))?.[0])
-      );
-    } catch {
-      // A file this system cannot run (ENOEXEC) throws here rather than in the callback: no version.
-      done(undefined);
+  const r = await probe(cmd, [...before, '--version'], { env: cleanEnv(), timeout: 15_000 });
+  let version: string | undefined;
+  switch (r.status) {
+    // A tool that exits with an error may still have printed its version.
+    case 'ok':
+    case 'failed':
+      version = VERSION.exec(r.out)?.[0];
+      break;
+    case 'missing':
+    case 'timeout':
+      version = undefined;
+      break;
+    default: {
+      const missed: never = r;
+      throw new Error(`${cmd} --version came back as ${JSON.stringify(missed)}`);
     }
-  });
+  }
   read.set(agent, { stamp, version });
   return version;
 }

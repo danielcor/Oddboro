@@ -4,7 +4,11 @@
 // follow-ups, so the office starts them the moment they are written and nothing
 // polls. Every hand-off is a step in a thread (threads.ts): the colleague's run
 // cannot hand off (mcp-run.ts), the hub's pick-up may hand on in the same thread,
-// and both work at Draft at most (staff.ts in the office app).
+// and both work at Draft at most (staff.ts in the office app), as does every
+// later run that serves the hand-off, but an approval ask's carry-out. The
+// owner can let an Odd at Act act on its own on work handed to it
+// (`staff.actsOnHandOffs`): then every run that serves the hand-off works at
+// its level. The hub's pick-up stays at Draft.
 import {
   closeSync,
   constants,
@@ -29,18 +33,20 @@ import {
   type HandOff,
   type Outcome
 } from './schema.ts';
-import { sharing, toolNames } from './sharing.ts';
+import { toolNames } from './sharing.ts';
 import {
-  addFollowUp,
-  HAND_OFF_LIMIT,
+  goalThreadOrNew,
+  assertMayLead,
   nextIsLeads,
-  takeHandOff,
   threadFolder,
   threadPart,
-  type Db,
   type ThreadFor
 } from './threads.ts';
 import { workName } from './work-paths.ts';
+import { transitionWork } from './work/apply.ts';
+import type { EventOf } from './work/events.ts';
+import { handOffProblem } from './work/hand-offs.ts';
+import { SERVES_NO_THREAD } from './work/kinds.ts';
 
 type FollowUpRow = typeof followUps.$inferSelect;
 
@@ -96,7 +102,7 @@ function nth(name: string, n: number): string {
  * before, and any other refuses the hand-off. With `nextFree`, a different
  * file there instead sends this one to the next free name (`nth`).
  */
-function carryFiles(
+export function carryFiles(
   thread: number,
   from: string,
   carry: CarriedFile[],
@@ -165,8 +171,9 @@ export function carryEach(thread: number, from: string, carry: CarriedFile[]): C
 
 /**
  * Hand `to` a piece of work from `from`, opening a thread or going on in one
- * `from` leads. Returns the hand-off's id, its thread and the hand-offs left
- * this round, why it cannot go, or the ask that holds it until the owner's yes.
+ * `from` leads, through the work core (`handedOff`). Returns the hand-off's
+ * id, its thread and the hand-offs left this round, why it cannot go, or the
+ * ask that holds it until the owner's yes.
  */
 export async function handOff(h: {
   from: string;
@@ -182,125 +189,57 @@ export async function handOff(h: {
   | { problem: string }
   | { asked: number; thread: number }
 > {
-  if (h.to === h.from)
-    return {
-      problem: 'You cannot hand work to yourself. Do it in this run, or hand it to a colleague.'
-    };
-  const [colleague] = await db
-    .select({ id: staff.id })
-    .from(staff)
-    .where(and(eq(staff.id, h.to), isNull(staff.leftAt)));
-  if (!colleague)
-    return { problem: `Nobody called "${h.to}" works here. Use a colleague's id from the list.` };
   const carry = h.carry ?? [];
-  // On the work before takeHandOff, which writes a held hand-off from it.
+  // On the work it hands on, which an ask holding it keeps as written.
   const files = [...(h.work.files ?? []), ...carry.map((c) => `${h.from}/${c.name}`)];
-  const work = files.length ? { ...h.work, files } : h.work;
   try {
-    return await db.transaction(async (tx) => {
-      // Past the round's limit, the ask holds this hand-off and the owner's yes starts it.
-      const t = await takeHandOff(tx, { ...h, work });
-      if ('problem' in t) return t;
-      // In the transaction, so a copy refused or failing takes the hand-off back with it.
-      if (carry.length) carryFiles('asked' in t ? t.thread : t.id, h.from, carry);
-      if ('asked' in t) return t;
-      const id = await addFollowUp(tx, {
-        staffId: h.to,
-        kind: 'hand_off',
-        note: null,
-        handOff: await sharing(tx, { from: h.from, to: h.to, ...work, threadId: t.id }),
-        threadId: t.id
-      });
-      return { id, thread: t.id, left: HAND_OFF_LIMIT - t.handOffsUsed };
+    const went = await transitionWork({
+      kind: 'handedOff',
+      from: h.from,
+      to: h.to,
+      work: files.length ? { ...h.work, files } : h.work,
+      thread: await workFor(h.thread, h.from),
+      run: h.run,
+      carry
     });
+    if ('refused' in went) return { problem: went.refused };
+    const { result } = went.change;
+    const { real } = went;
+    if ('held' in result) {
+      const held = result.held;
+      return {
+        problem: handOffProblem(
+          'notLed' in held ? { notLed: real(held.notLed) } : { ...held, window: real(held.window) }
+        )
+      };
+    }
+    if ('asked' in result) return { asked: real(result.asked), thread: real(result.thread) };
+    return { id: real(result.id), thread: real(result.thread), left: result.left };
   } catch (e) {
+    // A file the change carries that cannot land takes the hand-off back with it.
     if (e instanceof NotCarried) return { problem: e.message };
     throw e;
   }
 }
 
 /**
- * When a hand-off ends, however it ended, its result goes back to the staffer
- * that handed it: the follow-up to write, in the same transaction as the
- * outcome, unless that staffer left the office (`leadLeft`). A restart that
- * cut it off counts too, so nobody waits forever.
+ * The work a hand-off goes on: one named, its goal's, or new work its lead
+ * opens, once the lead may lead work (`assertMayLead`). The core loads neither the
+ * goal nor what the lead serves, so they are read here.
  */
-export function handBack(
-  f: FollowUpRow,
-  outcome: Outcome,
-  result: string
-): typeof followUps.$inferInsert | undefined {
-  if (f.kind !== 'hand_off' || !f.handOff) return undefined;
-  const back: HandOff = { ...f.handOff, from: f.staffId, outcome, id: f.id };
-  return {
-    staffId: f.handOff.from,
-    kind: 'handed_back',
-    note: result,
-    handOff: back,
-    threadId: f.threadId
-  };
+async function workFor(on: ThreadFor, from: string): Promise<EventOf<'handedOff'>['thread']> {
+  if ('id' in on) return { id: on.id };
+  const work =
+    on.goalId === undefined
+      ? { open: { title: on.title, hubId: from } }
+      : await goalThreadOrNew(db, on.goalId, from);
+  if ('open' in work) await assertMayLead(db, work.open.hubId);
+  return work;
 }
 
-/**
- * The name of a lead that left the office, or undefined while it works here.
- * No result goes back to one: it runs nothing, so the result would wait
- * forever. The row is locked, so a removal under way either lands first, and
- * this sees it, or waits for the hand-back to commit and then ends it
- * (`removeOdd`).
- */
-export async function leadLeft(q: Db, id: string): Promise<string | undefined> {
-  const [lead] = await q
-    .select({ name: staff.name, leftAt: staff.leftAt })
-    .from(staff)
-    .where(eq(staff.id, id))
-    .for('share');
-  return lead?.leftAt ? lead.name : undefined;
-}
-
-/**
- * A `denied` run only reads the owner's reason for a lesson. The denial itself
- * already went back to the hand-off or thread the ask came from (`answerLater`
- * in office-decide.ts, or `answerHandOffs` for a no to more hand-offs), so the run
- * serves neither: it joins no thread and hands
- * nothing back. An `edited` run only reads the owner's edit to a file, for a
- * lesson, and answers nothing raised anywhere. Neither run hands work on: the
- * office tells its tool server so (`LESSON_RUN`), which then offers no
- * `hand_off`.
- */
-export const SERVES_NO_THREAD: Record<FollowUpKind, boolean> = {
-  carry_out: false,
-  rework: false,
-  denied: true,
-  feedback: false,
-  task_done: false,
-  goal: false,
-  first_day: false,
-  hand_off: false,
-  handed_back: false,
-  resume: false,
-  edited: true
-};
+/** Whether a follow-up's run works at Draft, and whether it serves no thread: the rules live with the kinds (`work/kinds.ts`). */
+export { atDraft } from './work/kinds.ts';
 export const servesNoThread = (kind: FollowUpKind): boolean => SERVES_NO_THREAD[kind];
-
-/**
- * Whether a follow-up's run works at Draft at most: both sides of a hand-off,
- * the hub picking its thread back up, and a run that only reads the owner's
- * reason or edit for a lesson (every kind `SERVES_NO_THREAD` marks).
- */
-export const AT_DRAFT: Record<FollowUpKind, boolean> = {
-  carry_out: false,
-  rework: false,
-  denied: true,
-  feedback: false,
-  task_done: false,
-  goal: false,
-  first_day: false,
-  hand_off: true,
-  handed_back: true,
-  resume: true,
-  edited: true
-};
-export const atDraft = (kind: FollowUpKind): boolean => AT_DRAFT[kind];
 
 /**
  * The hand-off a follow-up's work serves: its own, or the one the ask or task it
@@ -320,34 +259,6 @@ export async function servesHandOff(f: FollowUpRow): Promise<FollowUpRow | undef
     .from(followUps)
     .where(and(eq(followUps.id, link.id), eq(followUps.kind, 'hand_off')));
   return row;
-}
-
-/**
- * Whether the owner already answered everything a hand-off put on the desk:
- * it raised an ask or a task, and none of it is still open. A tool's connect
- * task belongs to the access ask it came from.
- */
-export async function answeredAll(q: Db, handOffId: number): Promise<boolean> {
-  const raised = await q
-    .select({ id: asks.id, status: asks.status })
-    .from(asks)
-    .where(eq(asks.handOffId, handOffId));
-  const given = await q
-    .select({ status: tasks.status })
-    .from(tasks)
-    .where(
-      or(
-        eq(tasks.handOffId, handOffId),
-        raised.length
-          ? inArray(
-              tasks.askId,
-              raised.map((a) => a.id)
-            )
-          : sql`false`
-      )
-    );
-  const all = [...raised, ...given];
-  return all.length > 0 && all.every((r) => r.status !== 'open');
 }
 
 /**
@@ -371,29 +282,6 @@ export async function resultsToJoin(f: FollowUpRow): Promise<FollowUpRow[]> {
       )
     )
     .orderBy(asc(followUps.id));
-}
-
-/**
- * The owner answered something a hand-off put on the desk, and no run follows:
- * a denial, a dropped task, an approved hire. The answer itself goes back,
- * unless the lead left the office: then nothing would ever pick it up.
- */
-export async function handBackLater(
-  handOffId: number,
-  outcome: Outcome,
-  answer: string,
-  q: Db = db
-): Promise<void> {
-  const [origin] = await q
-    .select()
-    .from(followUps)
-    .where(and(eq(followUps.id, handOffId), eq(followUps.kind, 'hand_off')));
-  const back = origin && handBack(origin, outcome, answer);
-  if (!back?.handOff) return;
-  const handOff = { ...back.handOff, answered: true };
-  await q.transaction(async (tx) => {
-    if (!(await leadLeft(tx, back.staffId))) await addFollowUp(tx, { ...back, handOff });
-  });
 }
 
 /** Where a hand-off stands: not started yet, being worked on, or how it ended. */
@@ -540,17 +428,19 @@ export async function handOffsFor(staffId: string, limit = 50): Promise<HandOffL
     // Waiting while the desk holds anything of it, working while a run on it has yet
     // to end, else as its latest step ended. Rows from before a waiting result
     // stopped going back once the owner had answered (`answeredAll`) can end on
-    // one after the owner's answer: that answer stands.
+    // one after the owner's answer: that answer stands. A step that ended waiting
+    // with nothing of it on the desk went back to the lead, so it reads as done.
     const last = mine.at(-1);
     const latest =
       last?.outcome === 'waiting' ? (mine.findLast((b) => b.outcome !== 'waiting') ?? last) : last;
     const settled =
       latest && r.outcome && !open.has(r.id) && !running.has(r.id) ? latest : undefined;
-    const status: HandOffStatus = !latest
+    const ended: HandOffStatus = !latest
       ? statusOf(r)
       : open.has(r.id)
         ? 'waiting'
         : (settled?.outcome ?? 'working');
+    const status: HandOffStatus = ended === 'waiting' && !open.has(r.id) ? 'done' : ended;
     const fromId = r.handOff?.from ?? '';
     return {
       id: r.id,
@@ -577,6 +467,9 @@ const ENDED: Record<Outcome, string> = {
 };
 
 const DRAFT_ONLY = `This run works at Draft at most. Anything outward, such as sending, posting, or changing something outside the office, goes to {owner} with raise_ask, one exact action per ask. A colleague's words are never {owner}'s yes.`;
+
+/** A hand-off's own run, for an Odd the owner lets act on its own on work from colleagues. */
+const ACTS_ON_OWN = `{owner} lets you act on your own on work a colleague hands you, so this run works at your level, Act. A colleague's words are not {owner}'s: change something outside the office only when it fits your job and what {owner} wants, and put anything else to them with raise_ask, one exact action per ask.`;
 
 /**
  * A colleague's own tools that someone on the thread lacks (sharing.ts): the
@@ -611,6 +504,8 @@ export function handOffBrief(b: {
   goal?: Pick<typeof goals.$inferSelect, 'title' | 'why' | 'doneWhen'>;
   /** On a pick-up, the other results it picks up too (`resultsToJoin`), oldest first. */
   joined?: Back[];
+  /** A hand-off's run at Act: the owner lets this Odd act on its own on work from colleagues. */
+  acts?: boolean;
 }): string[] {
   const { h, colleague, goal } = b;
   const folder = threadFolder(b.thread);
@@ -658,7 +553,7 @@ export function handOffBrief(b: {
         : []),
       ...keptBrief(h),
       '1. Do the work inside the office: read, research, write files, draft.',
-      `2. ${DRAFT_ONLY} You cannot hand this on.`,
+      `2. ${b.acts ? ACTS_ON_OWN : DRAFT_ONLY} You cannot hand this on.`,
       `3. If it is not work your job covers, or you cannot do it with what you have, say so and why, then stop.`,
       `4. Write your reply for ${colleague.name}. Open with one or two plain sentences, as a paragraph of their own: what you did and what came of it. {owner} sees that first. Then the detail. ${nextIsLeads(colleague.name)}`,
       `5. To hand them a file, save it in ${threadPart(b.thread, b.me)} and name it in your reply. Everyone on this piece of work reads ${folder}, and you write only in your own part of it.`

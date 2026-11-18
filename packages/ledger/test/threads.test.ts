@@ -27,5 +27,5 @@ test('a thread with something open on the desk is listed as waiting on the owner
 
 test('a stopped thread is listed as one that cannot be continued', () => {
   const text = recentThreadsBrief([{ id: 7, title: 'Plan the trip', stage: 'stopped' }]);
-  assert.match(text, /Work 7: Plan the trip \(\{owner\} stopped it, so it cannot be continued\)/);
+  assert.match(text, /Work 7: Plan the trip \(it has stopped, so it cannot be continued\)/);
 });

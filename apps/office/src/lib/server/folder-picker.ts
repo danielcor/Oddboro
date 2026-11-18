@@ -7,9 +7,8 @@
 // the path instead and the page says why. The picked path goes through the
 // same checks as a typed one (`checkFolder`), so the picker widens nothing.
 // One picker at a time, closed after five minutes. Server only.
-import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
-import { currentPlatform } from '@oddboro/ledger/platform';
+import { currentPlatform, probe } from '@oddboro/ledger/platform';
 import { onPath } from './on-path.ts';
 
 export type Picked = { path: string } | { cancelled: true } | { unavailable: string };
@@ -89,24 +88,28 @@ export async function pickFolder(prompt: string): Promise<Picked> {
   if ('unavailable' in dialog) return dialog;
   open = true;
   try {
-    const out = await new Promise<string>((done) => {
-      try {
-        execFile(
-          dialog.cmd,
-          dialog.args,
-          {
-            env: { ...process.env, ...dialog.env },
-            timeout: WAIT_MS,
-            windowsHide: true,
-            encoding: 'utf8'
-          },
-          // A cancel ends with an error (exit 1 on a Mac, zenity and kdialog) or nothing printed.
-          (e, stdout) => done(e ? '' : String(stdout))
-        );
-      } catch {
-        done('');
-      }
+    const r = await probe(dialog.cmd, dialog.args, {
+      env: { ...process.env, ...dialog.env },
+      timeout: WAIT_MS
     });
+    let out: string;
+    switch (r.status) {
+      case 'ok':
+        out = r.out;
+        break;
+      // A cancel ends with an error (exit 1 on a Mac, zenity and kdialog) or
+      // nothing printed. A dialog that could not open or was left open past
+      // the wait picks nothing either.
+      case 'failed':
+      case 'missing':
+      case 'timeout':
+        out = '';
+        break;
+      default: {
+        const missed: never = r;
+        throw new Error(`The folder picker came back as ${JSON.stringify(missed)}`);
+      }
+    }
     const path = out.replace(/\r?\n$/, '');
     if (!path.trim()) return { cancelled: true };
     // AppleScript ends a folder with "/": the folder itself, as a typed path would name it.

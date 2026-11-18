@@ -6,7 +6,8 @@ import { db } from './db.ts';
 import { fixedError } from './errors.ts';
 import { chatSession } from './home.ts';
 import { type Db } from './threads.ts';
-import { staff, parts } from './schema.ts';
+import { owner, staff, parts } from './schema.ts';
+import { ACT_CHECK_NEEDED, wrongAnswers } from './act-check.ts';
 import {
   AGENT_NAMES,
   commandsHow,
@@ -23,12 +24,12 @@ import {
 // Read only inside functions, so the import cycle with managers.ts is safe.
 import { MANAGER_ROLE } from './managers.ts';
 import { currentPlatform } from './platform.ts';
-import { levelAtMost, type Level } from './access-words.ts';
-import { isGrantable, OFFICE_TOOLS, ON_BY_DEFAULT } from './tools.ts';
+import { HAND_OFF_CHOICE, levelAtMost, type Level, type OwnSwitch } from './access-words.ts';
+import { isGrantable, OFFICE_TOOLS, officeToolsSaid, ON_BY_DEFAULT } from './tools.ts';
 import { HIRE_DEFAULTS } from './grantable.ts';
 import { lookSignature, type DrawnPart, type LookSpec } from '@oddboro/sprites/look';
 import type { PersonaLink } from './personas.ts';
-import type { StaffRow } from './office.ts';
+import type { AskRow, StaffRow } from './office.ts';
 import { record } from './office-ledger.ts';
 
 // Staff
@@ -67,16 +68,132 @@ export async function formerStaff(): Promise<StaffRow[]> {
   return db.select().from(staff).where(isNotNull(staff.leftAt)).orderBy(desc(staff.leftAt));
 }
 
-/** Only the owner moves a staffer's level. Grants above the new level wait until it rises again. */
-export async function setPermission(id: string, permission: Level): Promise<void> {
-  const before = await staffer(id);
-  if (!before || before.permission === permission) return;
-  await db.update(staff).set({ permission }).where(eq(staff.id, id));
+/**
+ * Something tried to put an Odd at Act before the owner passed the Act check
+ * (act-check.ts). The routes answer it with 409 and its message, and the page
+ * shows the check.
+ */
+export class ActCheckNeeded extends Error {
+  constructor() {
+    super(ACT_CHECK_NEEDED);
+  }
+}
+
+/** Whether the owner passed the Act check. Once passed, it stays passed. */
+export async function actCheckPassed(q: Db = db): Promise<boolean> {
+  const [row] = await q.select({ at: owner.actCheckAt }).from(owner).where(eq(owner.id, 'owner'));
+  return !!row?.at;
+}
+
+/** Refuses putting an Odd at Act until the owner passed the Act check. */
+async function needActCheck(q: Db, permission: Level): Promise<void> {
+  if (permission === 'act' && !(await actCheckPassed(q))) throw new ActCheckNeeded();
+}
+
+/**
+ * The owner's answers to the Act check, checked here, not on the page. All
+ * right: the pass is kept with its time, once, with one ledger line. Any
+ * wrong: nothing changes, and the positions of the wrong ones come back.
+ */
+export async function passActCheck(answers: unknown): Promise<{ wrong: number[] }> {
+  const wrong = wrongAnswers(answers);
+  if (!wrong) throw fixedError('Answer each of the three with true or false');
+  if (wrong.length) return { wrong };
+  const [first] = await db
+    .update(owner)
+    .set({ actCheckAt: new Date() })
+    .where(and(eq(owner.id, 'owner'), isNull(owner.actCheckAt)))
+    .returning({ id: owner.id });
+  if (first) await record({ kind: 'decision', actor: 'owner', title: 'Passed the Act check' });
+  else if (!(await actCheckPassed())) throw fixedError('Finish the welcome first.');
+  return { wrong };
+}
+
+/**
+ * Only the owner moves a staffer's level. Grants above the new level wait
+ * until it rises again. Act waits for the Act check (`ActCheckNeeded`). A
+ * move up to Act also takes the owner's choice for work another Odd hands it
+ * (`actsOnHandOffs`); left out, the stored choice stays.
+ */
+export async function setPermission(
+  id: string,
+  permission: Level,
+  actsOnHandOffs?: boolean
+): Promise<void> {
+  const done = await changeLevel(db, id, permission, actsOnHandOffs);
+  if (!done) return;
+  await record({ kind: 'access', actor: 'owner', title: done.title });
+  if (done.also) await record({ kind: 'access', actor: 'owner', title: done.also });
+}
+
+/**
+ * The change `setPermission` makes, in `q`, with the ledger title it is
+ * written under. Nothing when the Odd is gone or already at that level. A
+ * move up to Act throws `ActCheckNeeded` until the owner passed the Act check,
+ * so the Settings tab and a level ask's yes both wait for it. A move up to
+ * Act from a lower level stores `actsOnHandOffs` when the owner chose it,
+ * and `also` is the ledger line for that choice when it changed.
+ */
+async function changeLevel(
+  q: Db,
+  id: string,
+  permission: Level,
+  actsOnHandOffs?: boolean
+): Promise<{ title: string; also?: string } | undefined> {
+  const before = await staffer(id, q);
+  if (!before) return;
+  const change = levelChange(before, permission, actsOnHandOffs);
+  if (!change) return;
+  await needActCheck(q, permission);
+  await q.update(staff).set(change.set).where(eq(staff.id, id));
+  return { title: change.title, ...(change.also ? { also: change.also } : {}) };
+}
+
+/**
+ * The change `changeLevel` makes to `before`, and its ledger words. Nothing
+ * when the Odd is already at that level. Pure, so the work core reads the
+ * same words before a level ask's yes makes the change.
+ */
+function levelChange(
+  before: StaffRow,
+  permission: Level,
+  actsOnHandOffs?: boolean
+): { set: Partial<StaffRow>; title: string; also?: string } | undefined {
+  if (before.permission === permission) return;
+  const chose =
+    permission === 'act' &&
+    actsOnHandOffs !== undefined &&
+    actsOnHandOffs !== before.actsOnHandOffs;
   const up = !levelAtMost(permission, before.permission);
+  return {
+    set: chose ? { permission, actsOnHandOffs } : { permission },
+    title: `${up ? 'Raised' : 'Lowered'} ${before.name} from ${before.permission} to ${permission}`,
+    ...(chose ? { also: HAND_OFF_CHOICE.ledger(before.name, actsOnHandOffs) } : {})
+  };
+}
+
+/**
+ * The owner's choice for work another Odd hands an Odd at Act, changed on its
+ * Settings tab: on, that work runs at Act and its standing yeses apply there;
+ * off, it runs at Draft at most and each change waits for the owner's yes.
+ * Only an Odd at Act shows the choice, so only one at Act takes a change.
+ */
+export async function setActsOnHandOffs(
+  id: string,
+  acts: boolean
+): Promise<{ refused: string } | undefined> {
+  const before = await staffer(id);
+  if (!before) return { refused: 'No such Odd' };
+  if (before.permission !== 'act')
+    return {
+      refused: `Put ${before.name} at Act first. Below Act, work from colleagues cannot pass its level anyway.`
+    };
+  if (before.actsOnHandOffs === acts) return;
+  await db.update(staff).set({ actsOnHandOffs: acts }).where(eq(staff.id, id));
   await record({
     kind: 'access',
     actor: 'owner',
-    title: `${up ? 'Raised' : 'Lowered'} ${before.name} from ${before.permission} to ${permission}`
+    title: HAND_OFF_CHOICE.ledger(before.name, acts)
   });
 }
 
@@ -204,18 +321,76 @@ export async function setAgent(
 
 /** Only the owner grants or removes an office tool. Takes effect on the staffer's next run. */
 export async function setTool(id: string, tool: string, on: boolean): Promise<void> {
-  const found = OFFICE_TOOLS.find((t) => t.id === tool);
-  if (!found || !isGrantable(tool)) throw new Error(`${tool} is not an office tool you grant`);
-  const before = await staffer(id);
-  if (!before || before.tools.includes(tool) === on) return;
-  const tools = on ? [...before.tools, tool] : before.tools.filter((t) => t !== tool);
-  await db.update(staff).set({ tools }).where(eq(staff.id, id));
-  await record({
-    kind: 'access',
-    actor: 'owner',
-    title: on ? `Gave ${before.name} ${found.name}` : `Took ${found.name} from ${before.name}`,
-    body: found.does
-  });
+  const done = await changeTools(db, id, [tool], on);
+  if (done) await record({ kind: 'access', actor: 'owner', ...done });
+}
+
+/**
+ * The change `setTool` makes, for one or more office tools, in `q`, with the
+ * ledger title and body it is written under. Refused when any of them is not
+ * one the owner grants. Tools already so are left; nothing when the Odd is
+ * gone or every tool is already so.
+ */
+async function changeTools(
+  q: Db,
+  id: string,
+  tools: readonly string[],
+  on: boolean
+): Promise<{ title: string; body: string } | undefined> {
+  if (!tools.every(isGrantable)) throw fixedError('That is not an office tool you grant');
+  const before = await staffer(id, q);
+  if (!before) return;
+  const change = toolsChange(before, tools, on);
+  if (!change) return;
+  await q.update(staff).set({ tools: change.tools }).where(eq(staff.id, id));
+  return { title: change.title, body: change.body };
+}
+
+/**
+ * The change `changeTools` makes to `before`, and its ledger words. Nothing
+ * when every tool named is already that way. Pure, so the work core reads the
+ * same words before an office tool ask's yes makes the change.
+ */
+function toolsChange(
+  before: StaffRow,
+  tools: readonly string[],
+  on: boolean
+): { tools: string[]; title: string; body: string } | undefined {
+  const changing = OFFICE_TOOLS.filter(
+    (t) => tools.includes(t.id) && before.tools.includes(t.id) !== on
+  );
+  if (!changing.length) return;
+  const ids: string[] = changing.map((t) => t.id);
+  const said = officeToolsSaid(ids);
+  return {
+    tools: on ? [...before.tools, ...ids] : before.tools.filter((t) => !ids.includes(t)),
+    title: on ? `Gave ${before.name} ${said}` : `Took ${said} from ${before.name}`,
+    body: changing.map((t) => t.does).join(' ')
+  };
+}
+
+/**
+ * The ledger words of a yes to a level or office tool ask, for the Odd as it
+ * is before the yes: the Settings tab's line for the change, and `also`, the
+ * owner's choice for work from colleagues that a raise to Act stored. Empty
+ * when the yes changes nothing, as a level the Odd already holds or passed,
+ * or tools already on. What `grantSetting` in office-decide.ts then writes.
+ */
+export function settingGranted(
+  before: StaffRow,
+  a: Pick<AskRow, 'kind' | 'level' | 'officeTools'>,
+  actsOnHandOffs?: boolean
+): { title?: string; also?: string } {
+  if (a.kind === 'level') {
+    if (!a.level || levelAtMost(a.level, before.permission)) return {};
+    const change = levelChange(before, a.level, actsOnHandOffs);
+    return change ? { title: change.title, ...(change.also ? { also: change.also } : {}) } : {};
+  }
+  if (a.kind === 'office_tool') {
+    const change = toolsChange(before, a.officeTools ?? [], true);
+    return change ? { title: change.title } : {};
+  }
+  return {};
 }
 
 /**
@@ -288,21 +463,13 @@ export async function setModel(
  */
 export async function setOwnTool(
   id: string,
-  which: 'commands' | 'web',
+  which: OwnSwitch,
   on: boolean
 ): Promise<{ refused: string } | undefined> {
-  const before = await staffer(id);
-  if (!before) return;
-  if (which === 'commands') {
-    const refused = commandsRefused(before.agent);
-    if (refused) return refused;
-  }
-  if (before[which] === on) return;
-  await db
-    .update(staff)
-    .set({ [which]: on })
-    .where(eq(staff.id, id));
-  const n = before.name;
+  const changed = await changeOwnTools(db, id, { which: [which], on });
+  if (!changed || 'refused' in changed) return changed;
+  if (!changed.on.length) return;
+  const n = changed.before.name;
   const title =
     which === 'commands'
       ? on
@@ -315,8 +482,38 @@ export async function setOwnTool(
     kind: 'access',
     actor: 'owner',
     title,
-    ...networkNote(before, { ...before, [which]: on })
+    ...networkNote(changed.before, changed.after)
   });
+}
+
+/**
+ * Set a working Odd's own switches in `which` to `on`, in `q`, the one change
+ * both the Settings tab (`setOwnTool`) and a switch ask's yes make. Ones
+ * already set stay as they are, and `on` names those that changed. Run
+ * commands in `which` is refused for a tool that does not follow the switch
+ * on this system, before anything changes. The caller writes the ledger line.
+ */
+export async function changeOwnTools(
+  q: Db,
+  id: string,
+  { which, on }: { which: readonly OwnSwitch[]; on: boolean }
+): Promise<
+  { before: StaffRow; after: StaffRow; on: OwnSwitch[] } | { refused: string } | undefined
+> {
+  const before = await staffer(id, q);
+  if (!before) return;
+  if (which.includes('commands')) {
+    const refused = commandsRefused(before.agent);
+    if (refused) return refused;
+  }
+  const changing = which.filter((s) => before[s] !== on);
+  if (!changing.length) return { before, after: before, on: changing };
+  const [after] = await q
+    .update(staff)
+    .set(Object.fromEntries(changing.map((s) => [s, on])))
+    .where(eq(staff.id, id))
+    .returning();
+  return after && { before, after, on: changing };
 }
 
 export type Hire = Pick<
@@ -325,6 +522,8 @@ export type Hire = Pick<
 > & {
   /** Its level; `HIRE_DEFAULTS` when left out. */
   permission?: Level;
+  /** At Act, the owner's choice for work another Odd hands it: true lets it act on its own there. */
+  actsOnHandOffs?: boolean;
   /** The office they work in, by name. */
   office?: string;
   sprite?: string;
@@ -393,7 +592,13 @@ export async function setLook(
   await record({ kind: 'work', actor: 'owner', title: `Redrew ${who.name}'s look` });
 }
 
+/**
+ * Hire an Odd. A hire at Act waits for the Act check (`ActCheckNeeded`), and
+ * keeps the owner's choice for work another Odd hands it (`actsOnHandOffs`),
+ * which only a hire at Act takes.
+ */
 export async function hire(h: Hire): Promise<StaffRow> {
+  await needActCheck(db, h.permission ?? HIRE_DEFAULTS.staff.permission);
   const base =
     h.name
       .toLowerCase()
@@ -409,7 +614,8 @@ export async function hire(h: Hire): Promise<StaffRow> {
     const twin = await lookTaken(h.look);
     if (twin) throw new Error(`${twin.name} already looks exactly like that. Redraw first.`);
   }
-  const { newParts, ...values } = h;
+  const { newParts, actsOnHandOffs, ...values } = h;
+  const acts = values.permission === 'act' && actsOnHandOffs === true;
   const [row] = await db
     .insert(staff)
     // With no tool picked, the hire runs on the office's own.
@@ -417,7 +623,8 @@ export async function hire(h: Hire): Promise<StaffRow> {
       ...values,
       agent: values.agent ?? officeAgent(),
       id,
-      tools: tools ?? HIRE_DEFAULTS.staff.tools
+      tools: tools ?? HIRE_DEFAULTS.staff.tools,
+      actsOnHandOffs: acts
     })
     .returning();
   await saveParts(newParts, id);
@@ -427,7 +634,9 @@ export async function hire(h: Hire): Promise<StaffRow> {
     title: `Hired ${h.name}, ${h.role}`,
     body: h.remit
   });
+  if (acts)
+    await record({ kind: 'access', actor: 'owner', title: HAND_OFF_CHOICE.ledger(h.name, true) });
   return row;
 }
 
-export { ofWorkingOdd, networkNote };
+export { ofWorkingOdd, networkNote, changeLevel, changeTools };

@@ -1,6 +1,6 @@
 // A build with no address for reports: the SDK never starts, the page never
 // asks the owner, and the relay drops what the page sends. The office's own
-// database runs in a temp folder on a free port, since the page's `load`
+// database runs in a temp folder, since the page's `load`
 // queries it. Run with `npm test -w @oddboro/office`.
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
@@ -21,7 +21,6 @@ Object.assign(process.env, {
   // A settings file that does not exist, so no address comes from there.
   ODDBORO_ENV: join(folder, 'none.env'),
   ODDBORO_DB_PORT: String(port),
-  DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,
   // Even a yes sends nothing when there is nowhere to send it.
   OFFICE_DIAGNOSTICS: 'yes'
 });

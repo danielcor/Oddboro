@@ -1,13 +1,12 @@
 // Jobs and runs: an Odd's schedule, its own changes to its jobs and description,
 // and what the office did.
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { db } from './db.ts';
 import { fixedError } from './errors.ts';
 import { isOnThread, type Db } from './threads.ts';
 import {
   asks,
   jobs,
-  reports,
   runs,
   staff,
   tasks,
@@ -117,16 +116,17 @@ export async function updateJob(
   patch: Partial<
     Pick<JobRow, 'name' | 'instructions' | 'schedule' | 'enabled' | 'report' | 'missed' | 'files'>
   >,
-  expectedFiles?: JobFiles
+  expectedFiles?: JobFiles,
+  q: Db = db
 ): Promise<void> {
   if (patch.files)
     refuseFileCycle(
-      (await fileJobs()).map((j) =>
+      (await fileJobs(q)).map((j) =>
         j.id === id ? { ...j, name: patch.name ?? j.name, files: patch.files! } : j
       )
     );
-  const schedule = patch.schedule ?? (patch.enabled ? (await job(id))?.schedule : undefined);
-  const rows = await db
+  const schedule = patch.schedule ?? (patch.enabled ? (await job(id, q))?.schedule : undefined);
+  const rows = await q
     .update(jobs)
     .set({
       ...patch,
@@ -146,14 +146,17 @@ export async function updateJob(
 export type GoAhead = { said: string } | { askId: number };
 
 /** In a chat, the owner's words go in the ledger as their decision, beside the change. */
-async function recordGoAhead(who: StaffRow, go: GoAhead, what: string): Promise<void> {
+async function recordGoAhead(who: StaffRow, go: GoAhead, what: string, q: Db = db): Promise<void> {
   if ('said' in go)
-    await record({
-      kind: 'decision',
-      actor: 'owner',
-      title: `Asked ${who.name} in chat: ${what}`,
-      body: go.said
-    });
+    await record(
+      {
+        kind: 'decision',
+        actor: 'owner',
+        title: `Asked ${who.name} in chat: ${what}`,
+        body: go.said
+      },
+      q
+    );
 }
 
 export async function editOwnJob(
@@ -162,68 +165,101 @@ export async function editOwnJob(
   patch: Partial<
     Pick<JobRow, 'name' | 'instructions' | 'schedule' | 'report' | 'missed' | 'files'>
   >,
-  go: GoAhead
+  go: GoAhead,
+  q: Db = db
 ): Promise<JobRow | undefined> {
-  const who = await staffer(staffId);
-  const [j, other] = await db
+  const who = await staffer(staffId, q);
+  const [j, other] = await q
     .select()
     .from(jobs)
     .where(and(eq(jobs.staffId, staffId), eq(jobs.name, name)))
     .limit(2);
   if (other) throw new Error('Two jobs have that name. Rename one on the Odd’s card first.');
   if (!who || !j) return undefined;
-  if (patch.files && !(await isOnThread(staffId, patch.files.thread)))
+  if (patch.files && !(await isOnThread(staffId, patch.files.thread, q)))
     throw new Error('This Odd has no assignment on that work.');
-  await updateJob(j.id, patch);
-  await recordGoAhead(who, go, `change its job "${name}"`);
-  await record({
-    kind: 'work',
-    actor: staffId,
-    title: `Changed its job: ${patch.name ?? name}`,
-    body: [
-      patch.name && `Former name: ${name}`,
-      patch.files && `Scheduled files: ${JSON.stringify(patch.files)}`,
-      patch.instructions && `Steps:\n${patch.instructions}`,
-      patch.schedule && `Schedule: ${JSON.stringify(patch.schedule)}`,
-      patch.report !== undefined &&
-        `Reports to ${await ownerName()}: ${patch.report ? 'yes' : 'no'}`,
-      patch.missed && `Missed runs: ${MISSED_WORDS[patch.missed]}`
-    ]
-      .filter(Boolean)
-      .join('\n\n'),
-    askId: 'askId' in go ? go.askId : undefined
-  });
-  return job(j.id);
+  await updateJob(j.id, patch, undefined, q);
+  await recordGoAhead(who, go, `change its job "${name}"`, q);
+  await record(
+    {
+      kind: 'work',
+      actor: staffId,
+      title: `Changed its job: ${patch.name ?? name}`,
+      body: [
+        patch.name && `Former name: ${name}`,
+        patch.files && `Scheduled files: ${JSON.stringify(patch.files)}`,
+        patch.instructions && `Steps:\n${patch.instructions}`,
+        patch.schedule && `Schedule: ${JSON.stringify(patch.schedule)}`,
+        patch.report !== undefined &&
+          `Reports to ${await ownerName(q)}: ${patch.report ? 'yes' : 'no'}`,
+        patch.missed && `Missed runs: ${MISSED_WORDS[patch.missed]}`
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+      askId: 'askId' in go ? go.askId : undefined
+    },
+    q
+  );
+  return job(j.id, q);
+}
+
+/**
+ * A job description save that stopped because the text changed since the
+ * editor read it. `current` is the text there now, so the editor can start
+ * again from it.
+ */
+export class DescriptionChanged extends Error {
+  readonly current: string;
+  constructor(message: string, current: string) {
+    super(message);
+    this.current = current;
+  }
 }
 
 /**
  * Rewrite a staffer's job description, the text every run starts from. The owner
  * does it from the card, or the staffer does with their go-ahead. `was` is the
- * text the editor started from: if it changed since, the save stops instead of
- * overwriting someone else's edit. The ledger keeps the old and new versions.
+ * text the editor started from: the owner's when they opened it, the staffer's
+ * when its run began. If it changed since, the save stops with
+ * `DescriptionChanged` instead of overwriting someone else's edit. The ledger
+ * keeps the old and new versions.
  */
 export async function setDescription(
   staffId: string,
   text: string,
-  by: { owner: true; was: string } | { go: GoAhead }
+  by: ({ owner: true } | { go: GoAhead }) & { was: string }
 ): Promise<boolean> {
-  const who = await staffer(staffId);
-  if (!who) throw fixedError('No such Odd');
-  const desk = text.trim();
-  if (!desk) throw fixedError('A job description cannot be empty');
-  if ('owner' in by && by.was.trim() !== who.desk.trim())
-    throw new Error(`${who.name}'s job description changed since you opened it. Reopen it to see.`);
-  if (desk === who.desk.trim()) return false;
-  await db.update(staff).set({ desk }).where(eq(staff.id, staffId));
-  if ('go' in by) await recordGoAhead(who, by.go, 'rewrite its job description');
-  await record({
-    kind: 'work',
-    actor: 'owner' in by ? 'owner' : staffId,
-    title: 'owner' in by ? `Edited ${who.name}'s job description` : 'Rewrote its job description',
-    body: `Before:\n${who.desk}\n\nAfter:\n${desk}`,
-    askId: 'go' in by && 'askId' in by.go ? by.go.askId : undefined
+  return db.transaction(async (tx) => {
+    // Read the version this save will replace, even if another edit is finishing.
+    const [who] = await tx
+      .select()
+      .from(staff)
+      .where(and(eq(staff.id, staffId), isNull(staff.leftAt)))
+      .for('update');
+    if (!who) throw fixedError('No such Odd');
+    const desk = text.trim();
+    if (!desk) throw fixedError('A job description cannot be empty');
+    if (by.was.trim() !== who.desk.trim())
+      throw new DescriptionChanged(
+        `${who.name}'s job description changed since you opened it. Reopen it to see.`,
+        who.desk
+      );
+    if (desk === who.desk.trim()) return false;
+    await tx.update(staff).set({ desk }).where(eq(staff.id, staffId));
+    if ('go' in by) await recordGoAhead(who, by.go, 'rewrite its job description', tx);
+    await record(
+      {
+        kind: 'work',
+        actor: 'owner' in by ? 'owner' : staffId,
+        title:
+          'owner' in by ? `Edited ${who.name}'s job description` : 'Rewrote its job description',
+        body: `Before:\n${who.desk}\n\nAfter:\n${desk}`,
+        askId: 'go' in by && 'askId' in by.go ? by.go.askId : undefined
+      },
+      tx
+    );
+    return true;
   });
-  return true;
 }
 
 /** Remove a job that never ran. One that ran stays, paused, so its runs keep their record. */
@@ -240,8 +276,8 @@ export async function enabledJobs(): Promise<JobRow[]> {
     .where(and(eq(jobs.enabled, true), ofWorkingOdd(jobs.staffId)));
 }
 
-export async function job(id: number): Promise<JobRow | undefined> {
-  const [row] = await db.select().from(jobs).where(eq(jobs.id, id));
+export async function job(id: number, q: Db = db): Promise<JobRow | undefined> {
+  const [row] = await q.select().from(jobs).where(eq(jobs.id, id));
   return row;
 }
 
@@ -554,7 +590,6 @@ export async function officeActivity(since: Date) {
         staff: followUps.staffId,
         kind: followUps.kind,
         ask: asks.title,
-        report: reports.title,
         task: tasks.title,
         handOff: followUps.handOff,
         thread: threads.title,
@@ -563,7 +598,6 @@ export async function officeActivity(since: Date) {
       })
       .from(followUps)
       .leftJoin(asks, eq(followUps.askId, asks.id))
-      .leftJoin(reports, eq(followUps.reportId, reports.id))
       .leftJoin(tasks, eq(followUps.taskId, tasks.id))
       .leftJoin(threads, eq(followUps.threadId, threads.id))
       .where(gte(followUps.createdAt, since))
@@ -643,14 +677,14 @@ export async function officeActivity(since: Date) {
       }))
     },
     // Work owed after the owner answered: carrying out an approved ask, reworking one
-    // the owner sent back, acting on their feedback on a report, or picking up after a
-    // task they finished. A hand_off is work a colleague handed this staffer,
-    // handed_back is the colleague's result coming home, and resume is a thread's
-    // hub picking it back up. A null outcome is still to do.
+    // the owner sent back, or picking up after a task they finished. A hand_off is
+    // work a colleague handed this staffer, handed_back is the colleague's result
+    // coming home, and resume is a thread's hub picking it back up. A null outcome
+    // is still to do.
     followUps: follow.map((f) => ({
       from: f.staff,
       kind: f.kind,
-      about: f.ask ?? f.report ?? f.task ?? f.handOff?.title ?? f.thread,
+      about: f.ask ?? f.task ?? f.handOff?.title ?? f.thread,
       ...(f.handOff ? { colleague: f.handOff.from } : {}),
       outcome: f.outcome,
       at: pt(f.at)

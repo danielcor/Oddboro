@@ -96,7 +96,8 @@
   /** What waits on the owner in the drawer: a native question, proposals and unclear deliveries. */
   const waitingCount = $derived(
     (view?.question ? 1 : 0) +
-      work.filter((r) => r.state === 'proposed' || r.state === 'uncertain').length
+      work.filter((r) => r.state === 'proposed' || r.state === 'failed' || r.state === 'uncertain')
+        .length
   );
 
   const describe = (e: unknown) => (e instanceof Error ? e.message : 'Could not reach the office.');
@@ -140,6 +141,7 @@
     if (currentId === id) {
       work = record.work;
       view = record.view;
+      if (work.some((r) => r.state === 'failed' || r.state === 'uncertain')) details = true;
     }
   }
   async function select(id: string) {
@@ -156,7 +158,9 @@
     termView = crypto.randomUUID();
     await history(id);
     // Work waiting on the owner shows at once.
-    details = work.some((r) => r.state === 'proposed' || r.state === 'uncertain');
+    details = work.some(
+      (r) => r.state === 'proposed' || r.state === 'failed' || r.state === 'uncertain'
+    );
   }
   function startNew() {
     currentId = undefined;
@@ -731,7 +735,8 @@
                   </summary>
                   <p class="text-xs">
                     In that conversation, add the local marketplace, install its plugin, then reload
-                    plugins. New sessions opened here load it at launch.
+                    plugins. If it is already installed, update it with /plugin before reloading.
+                    New sessions opened here load it at launch.
                   </p>
                   <pre
                     class="whitespace-pre-wrap break-all">/plugin marketplace add {JSON.stringify(
@@ -754,14 +759,14 @@
                   <p class="whitespace-pre-wrap">{r.prompt}</p>
                   {#if r.file}<p class="text-xs text-muted">Project file: {r.file}</p>{/if}
                   {#if r.answer}<p class="whitespace-pre-wrap text-muted">{r.answer}</p>{/if}
-                  {#if r.state === 'proposed'}<p class="text-xs text-muted">
+                  {#if r.state === 'proposed' || r.state === 'failed'}<p class="text-xs text-muted">
                       This runs with your permissions on this computer.
                     </p>
                     <div class="flex gap-2">
                       <button
                         class="btn"
                         onclick={() => run(() => action('decide', { key: r.id, approve: true }))}
-                        >Take over and send</button
+                        >{r.state === 'failed' ? 'Retry assignment' : 'Take over and send'}</button
                       ><button
                         class="btn"
                         onclick={() => run(() => action('decide', { key: r.id, approve: false }))}

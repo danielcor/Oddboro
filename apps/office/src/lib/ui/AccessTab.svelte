@@ -3,6 +3,7 @@
   import {
     POSTAL_ID,
     GRANT_LABEL,
+    HAND_OFF_CHOICE,
     LEVEL_LABEL,
     LEVELS,
     GRANT_NEEDS,
@@ -17,6 +18,7 @@
   import { AGENT_NAMES, OFFICE_ACCOUNT, type Agent, type Effort } from '@oddboro/ledger/agents';
   import { AgentTools } from './agent-tools.svelte.ts';
   import { call } from './api.ts';
+  import { withActCheck } from './act-check.svelte.ts';
   import FoldersList from './FoldersList.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import IconButton from './IconButton.svelte';
@@ -371,8 +373,24 @@
 
   async function setPermission(permission: Level) {
     problem = refused = '';
+    if (permission === profile.permission) return;
+    const set = (actsOnHandOffs?: boolean) =>
+      call(`/api/staff/${profile.id}`, { permission, actsOnHandOffs }, 'PATCH');
     try {
-      await call(`/api/staff/${profile.id}`, { permission }, 'PATCH');
+      // Act waits for the owner's Act check, the first time only, then for
+      // their choice for work another Odd hands this Odd.
+      await (permission === 'act' ? withActCheck(profile.name, set) : set());
+    } catch (e) {
+      problem = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** At Act, what happens when another Odd hands this Odd work. */
+  async function setActsOnHandOffs(actsOnHandOffs: boolean) {
+    problem = refused = '';
+    if (actsOnHandOffs === profile.actsOnHandOffs) return;
+    try {
+      await call(`/api/staff/${profile.id}`, { actsOnHandOffs }, 'PATCH');
     } catch (e) {
       problem = e instanceof Error ? e.message : String(e);
     }
@@ -462,6 +480,34 @@
                 >
               {/each}
             </div>
+            <!-- Only at Act: below it, work from colleagues cannot pass the Odd's level anyway. The stored choice stays. -->
+            {#if profile.permission === 'act'}
+              <h4 class="mt-2.5 text-xs text-muted">{HAND_OFF_CHOICE.title(profile.name)}</h4>
+              <div
+                class="mt-1 flex gap-1"
+                role="radiogroup"
+                aria-label={HAND_OFF_CHOICE.title(profile.name)}
+              >
+                {#each [false, true] as acts (acts)}
+                  <button
+                    role="radio"
+                    class="flex-1 rounded-lg px-1.5 py-2 text-xs {profile.actsOnHandOffs === acts
+                      ? 'bg-sea/25 text-ink'
+                      : 'bg-raise text-muted'}"
+                    aria-checked={profile.actsOnHandOffs === acts}
+                    onclick={() => setActsOnHandOffs(acts)}
+                    >{acts
+                      ? HAND_OFF_CHOICE.acts.label(profile.name)
+                      : HAND_OFF_CHOICE.ask.label}</button
+                  >
+                {/each}
+              </div>
+              <p class="mt-1 text-[11px] text-muted">
+                {profile.actsOnHandOffs
+                  ? HAND_OFF_CHOICE.acts.line(profile.name)
+                  : HAND_OFF_CHOICE.ask.line(profile.name)}
+              </p>
+            {/if}
           </div>
         </ModelPicker>
       </section>

@@ -6,6 +6,7 @@
     personas,
     type PersonaOffers
   } from './persona-offers.svelte.ts';
+  import PersonaBrief from './PersonaBrief.svelte';
   import PersonaQuiet, { opened } from './PersonaQuiet.svelte';
 
   // The New Altitude personas offered to this owner, each with what it is and
@@ -48,6 +49,7 @@
             <p class="font-semibold text-ink">{o.displayName}</p>
             {#if o.jobTitle}<p class="text-muted">{o.jobTitle}</p>{/if}
           </div>
+          <PersonaBrief offer={o} />
           <p class="leading-relaxed text-ink">{o.disclosure}</p>
           <p class="leading-relaxed text-muted">{dataLine(o.name)}</p>
           {#if o.joined === 'installed' && o.quiet}

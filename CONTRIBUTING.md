@@ -34,6 +34,19 @@ Forgot one? `git commit --amend -s` fixes the last commit, and
 
 The rules behind them are in `CLAUDE.md`.
 
+## When we ask you something
+
+1. A maintainer who needs something from you comments on the pull request
+   and labels it `waiting-on-author`.
+2. Reply or push a commit. Either one moves it back to `needs-review` by
+   itself.
+3. With no reply for 7 days, a bot labels it `stale` and reminds you.
+4. With no reply for 7 more days, the bot closes it. Reopen it whenever you
+   are ready, and we pick it up again.
+
+A pull request labelled `keep-open` is never closed by the bot. Our comment
+on it says what happens if we do not hear back.
+
 ## The name
 
 The license covers the code, not the Oddboro name. A fork needs a name of

@@ -9,7 +9,7 @@
 //   npm run setup                  check, start and open the office
 //   npm run setup -- --check       check everything, change nothing
 //   npm run setup -- --env <file>  check against a different .env, to try one out
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { checkDatabase, checkMachine, type Check } from './checks.ts';
 import { OFFICE_LOG, openUrl, restartService, serviceInstalled } from './platform.ts';
@@ -45,10 +45,6 @@ const npm = (npmArgs: string[]) => {
       .on('close', (code) => done(code === 0))
   );
 };
-const quiet = (cmd: string, cmdArgs: string[]) =>
-  new Promise<string>((done) =>
-    execFile(cmd, cmdArgs, { cwd: REPO }, (_e, stdout) => done(stdout.trim()))
-  );
 
 // ---------------------------------------------------------------------------
 

@@ -16,20 +16,19 @@
   import LookStudio from './LookStudio.svelte';
   import WorkSection from './WorkSection.svelte';
   import { call } from './api.ts';
-  import type { Work } from '../staff/work.ts';
-  import { ACTIVITY_LABEL, type Activity, type StaffProfile } from '../staff/roster.ts';
+  import type { Activity, StaffProfile } from '../staff/roster.ts';
+  import { lineWords, workItems, type OddNow } from '../staff/odd-now.ts';
 
   type Props = {
     profile: StaffProfile;
     activity: Activity;
     version: number;
-    working: string | undefined;
-    work: Work[];
+    now: OddNow;
     /** Bumped to scroll to In progress. */
     focus: number;
     onsend: () => void;
   };
-  let { profile, activity, version, working, work, focus, onsend }: Props = $props();
+  let { profile, activity, version, now, focus, onsend }: Props = $props();
 
   let inProgress = $state<HTMLElement>();
   $effect(() => {
@@ -110,7 +109,9 @@
       <div class="mt-1 text-sm text-ember">{profile.role}</div>
       <div class="mt-2 flex items-center gap-1.5 text-xs text-ink">
         <span class="dot" class:live={activity !== 'home'}></span>
-        <span class="truncate">{working ? `Running ${working}` : ACTIVITY_LABEL[activity]}</span>
+        <span class="truncate"
+          >{now.show.is === 'running' ? `Running ${lineWords(now)}` : lineWords(now)}</span
+        >
       </div>
       <div class="mt-1 truncate text-[11px] text-muted">{runsOn}</div>
     </div>
@@ -123,10 +124,10 @@
   </p>
 
   <div bind:this={inProgress} class="scroll-mt-3">
-    <WorkSection {profile} items={work} />
+    <WorkSection {profile} items={workItems(now)} />
   </div>
 
-  <JobsSection {profile} {version} {working} />
+  <JobsSection {profile} {version} {now} />
 
   <JobDescription {profile} {version} />
 

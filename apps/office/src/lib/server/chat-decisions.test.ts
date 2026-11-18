@@ -21,7 +21,7 @@ async function runFollowUp(on: { ask?: number; task?: number }) {
   const w = waiting[0];
   const f = await L.startFollowUp(w.id);
   assert.ok(f, 'the follow-up did not start');
-  const r = await followThrough(f, w.ask, w.report, w.task, w.goal);
+  const r = await followThrough(f, w.ask, w.task, w.goal);
   await endFollowUp(f, await L.workTitle(f), r.outcome, r.text, r.joined);
   return { f, r };
 }
@@ -153,7 +153,7 @@ test('finishing with a written answer commits one note and gives it to one follo
   const f = await L.startFollowUp(waiting[0].id);
   assert.equal(f?.kind, 'task_done');
   assert.equal(f?.note, note);
-  const result = await followThrough(f!, undefined, undefined, waiting[0].task);
+  const result = await followThrough(f!, undefined, waiting[0].task);
   assert.equal(result.outcome, 'done', result.text);
   assert.ok(JSON.parse(result.text).system.includes(note));
 });
@@ -293,6 +293,34 @@ test('a proposal sent back in chat gets the reworked reply in chat', async () =>
   assert.equal(line?.text, r.text);
 });
 
+test('a no with no reason in chat to an ask on no work, or a task dropped in chat on no work, wakes its Odd once with the answer, replying under the card', async () => {
+  const { ask } = await L.raiseAsk('paige', {
+    title: 'Book the hall for Friday',
+    why: 'For the meeting.',
+    ifApproved: 'Book it.'
+  });
+  await post(asks.POST, ask.id, { decision: 'deny', chat: true });
+  const before = (await answersIn('paige')).length;
+  const { f, r } = await runFollowUp({ ask: ask.id });
+  assert.equal(f.kind, 'answered');
+  assert.deepEqual(f.chatCard, { kind: 'ask', id: ask.id, title: ask.title });
+  const lines = await answersIn('paige');
+  assert.equal(lines.length, before + 1);
+  assert.deepEqual(lines.at(-1)?.re, { kind: 'ask', id: ask.id, title: ask.title });
+  assert.equal(lines.at(-1)?.text, r.text);
+
+  const q = await L.giveTask('paige', { title: 'Order the chairs', why: 'w', steps: [] });
+  await post(tasks.POST, q.id, { op: 'finish', done: false, note: 'Not now.', chat: true });
+  const card = { kind: 'task', id: q.id, title: q.title };
+  const dropped = await runFollowUp({ task: q.id });
+  assert.equal(dropped.f.kind, 'answered');
+  assert.deepEqual(dropped.f.chatCard, card);
+  const after = await answersIn('paige');
+  assert.equal(after.length, lines.length + 1);
+  assert.deepEqual(after.at(-1)?.re, card);
+  assert.equal(after.at(-1)?.text, dropped.r.text);
+});
+
 test('a failed run on a chat answer says so in one line under the card', async () => {
   const q = await L.giveTask('paige', { title: 'Which room is quiet?', why: 'w', steps: [] });
   await post(tasks.POST, q.id, { op: 'finish', done: true, note: 'The back room.', chat: true });
@@ -376,4 +404,24 @@ test('a task with an attachment or a sign-in step stays on the Desk', async () =
     ]
   });
   assert.equal(chatAnswer(signIn, false), undefined);
+});
+
+test('a yes to access whose grant fails tells the owner why, as the Desk shows a refusal, and the ask reads approved', async () => {
+  const { ask } = await L.raiseAsk('sam', {
+    title: 'Connect Gmail to send',
+    why: 'To send the invoices.',
+    ifApproved: 'Send them.',
+    access: { connector: 'gmail', level: 'act' }
+  });
+  // The owner lowers Sam to Read while the ask waits on the Desk.
+  await L.pg`update staff set permission = 'read' where id = 'sam'`;
+  try {
+    assert.deepEqual(await refusal(post(asks.POST, ask.id, { decision: 'approve' })), {
+      status: 400,
+      message: 'Sam holds read, so it cannot be given act'
+    });
+    assert.equal((await L.ask(ask.id))?.status, 'approved');
+  } finally {
+    await L.pg`update staff set permission = 'act' where id = 'sam'`;
+  }
 });

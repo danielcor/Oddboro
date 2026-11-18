@@ -21,7 +21,8 @@ an app; `ledger` imports `world` and `sprites`, and `world` imports `sprites`.
 - `apps/office`. The office server and its page: the floor (`src/lib/floor/`),
   the panels (`src/lib/ui/`), the routes (`src/routes/api/`, one folder per
   thing), and running Odds (`src/lib/server/`: `staff.ts` runs one, `cli.ts`
-  starts the tools other than Claude Code, `sandbox.ts` walls commands).
+  gets each AI tool's launch ready (`LAUNCHES`), `drive.ts` runs it and reads
+  its stream, `sandbox.ts` walls commands).
 - `packages/world`. Rooms and offices as JSON (`rooms/`, `plans/`), an
   owner's office built from a spec (`src/generate.ts`), and `composeWorld`.
 - `packages/sprites`. The art as `.px` text, the palette, the compiler.
@@ -30,37 +31,72 @@ an app; `ledger` imports `world` and `sprites`, and `world` imports `sprites`.
 - `apps/site`. The public site, static. It reads `sprites` and `world` only.
 - `scripts`. The lint guards: plain Node, no dependencies.
 - `.github/workflows`. `ci.yml` runs the checks on every pull request, on a
-  Mac, Linux and Windows; `release.yml` builds the app; `codeql.yml` scans.
+  Mac, Linux and Windows, unless it changes only the site or the docs;
+  `site.yml` checks those; `app-smoke.yml` installs and smoke-tests the app
+  on pull requests that change it, and by hand; `release.yml` builds the app;
+  `codeql.yml` scans.
 
 ## One function per job
 
 Before writing a helper, use the one that already does the job.
 
-| Job                                                     | Use                                                   | In                                                     |
-| ------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ |
-| Write a ledger row (a decision, a hire, a run)          | `record()`                                            | `packages/ledger/src/office-ledger.ts`                 |
-| Find the office's folders, code and ports               | `home()`, `CODE`, `OFFICE_PORT`, `DATABASE_PORT`      | `packages/ledger/src/home.ts`                          |
-| Tell the office's time                                  | `zone()`                                              | `packages/ledger/src/time.ts`                          |
-| Read or write `.env`                                    | `readEnv()`, `writeEnv()`                             | `packages/ledger/src/env.ts`                           |
-| Read which system this is                               | `currentPlatform()`                                   | `packages/ledger/src/platform.ts`                      |
-| Start Claude Code, or reach Windows                     | `claudeCommand()`, `powershell()`                     | `packages/ledger/src/platform.ts`                      |
-| Know an AI tool's name and systems                      | `AGENT_NAMES`, `AGENT_PLATFORMS`                      | `packages/ledger/src/agents.ts`                        |
-| Know whether a run gets a shell                         | `commandsHow()`, `runsCommands()`                     | `packages/ledger/src/agents.ts`                        |
-| Know what an Odd's run reaches                          | `capabilities()`, `ownTools()`                        | `packages/ledger/src/capabilities.ts`                  |
-| Say a level or where the owner sets access              | `LEVELS`, `settingsTab()`, `levelRoute()`             | `packages/ledger/src/access-words.ts`                  |
-| Know whether an Odd holds an office tool                | `hasTool()`                                           | `packages/ledger/src/tools.ts`                         |
-| Register an office tool                                 | `tool()`                                              | `packages/ledger/src/mcp-run.ts`                       |
-| Check a folder before an Odd gets it                    | `checkFolder()`                                       | `packages/ledger/src/office-folders.ts`                |
-| Put a follow-up on a thread                             | `addFollowUp()`, which runs `settleThread()`          | `packages/ledger/src/threads.ts`                       |
-| Tell the page something changed                         | a table's trigger, or `emit()`                        | `apps/office/src/lib/server/events.ts`                 |
-| Tell every run how the office works                     | `house()`                                             | `apps/office/src/lib/server/house.ts`                  |
-| Run as the office, not as an Odd                        | `runAsOffice()`                                       | `apps/office/src/lib/server/office-run.ts`             |
-| Give the page an Odd                                    | `toProfile()`                                         | `apps/office/src/lib/server/profile.ts`                |
-| Reach an outside tool's server, for the owner or a run  | `upstream()`, through the run's gateway               | `apps/office/src/lib/server/access.ts`                 |
-| Refuse a request from anywhere but the page             | `guardOffice`                                         | `apps/office/src/lib/server/owner-page.ts`             |
-| Call the office from the page                           | `call()`, `stream()`, `follow()`                      | `apps/office/src/lib/ui/api.ts`                        |
-| Fail a lint guard                                       | `report()`                                            | `scripts/lib/files.ts`                                 |
-| Test against a database, the tool server, or the office | `pglite.ts`, `tool-server.ts`, `office-under-test.ts` | `packages/ledger/test/`, `apps/office/src/lib/server/` |
+| Job                                                     | Use                                                                   | In                                                     |
+| ------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------ |
+| Write a ledger row (a decision, a hire, a run)          | `record()`                                                            | `packages/ledger/src/office-ledger.ts`                 |
+| Find the office's folders, code and ports               | `home()`, `CODE`, `OFFICE_PORT`, `DATABASE_PORT`                      | `packages/ledger/src/home.ts`                          |
+| Tell the office's time                                  | `zone()`                                                              | `packages/ledger/src/time.ts`                          |
+| Read or write `.env`                                    | `readEnv()`, `writeEnv()`                                             | `packages/ledger/src/env.ts`                           |
+| Read which system this is                               | `currentPlatform()`                                                   | `packages/ledger/src/platform.ts`                      |
+| Start Claude Code, or reach Windows                     | `claudeCommand()`, `powershell()`                                     | `packages/ledger/src/platform.ts`                      |
+| Know an AI tool's name and systems                      | `AGENT_NAMES`, `AGENT_PLATFORMS`                                      | `packages/ledger/src/agents.ts`                        |
+| Know whether a run gets a shell                         | `commandsHow()`, `runsCommands()`                                     | `packages/ledger/src/agents.ts`                        |
+| Know what an Odd's run reaches                          | `capabilities()`, `ownTools()`                                        | `packages/ledger/src/capabilities.ts`                  |
+| Say a level or where the owner sets access              | `LEVELS`, `settingsTab()`, `levelRoute()`                             | `packages/ledger/src/access-words.ts`                  |
+| Know whether an Odd holds an office tool                | `hasTool()`                                                           | `packages/ledger/src/tools.ts`                         |
+| Register an office tool                                 | `tool()`                                                              | `packages/ledger/src/mcp-run.ts`                       |
+| Check a folder before an Odd gets it                    | `checkFolder()`                                                       | `packages/ledger/src/office-folders.ts`                |
+| Put a follow-up on a thread                             | `transitionWork()` with `runQueued`, whose `oweRun()` runs `settle()` | `packages/ledger/src/work/threads.ts`                  |
+| Change a system that keeps state                        | `transition()`                                                        | `packages/ledger/src/transition.ts`                    |
+| Decide what an event does to the office's work          | `decide()`, through `transitionWork()`                                | `packages/ledger/src/work/decide.ts`                   |
+| Test a system with random event sequences               | `explore()`                                                           | `packages/ledger/src/sequences.ts`                     |
+| Run an AI tool and read its stream                      | `drive()`                                                             | `apps/office/src/lib/server/drive.ts`                  |
+| Say what an Odd is doing, on any screen                 | `oddNow()`                                                            | `apps/office/src/lib/staff/odd-now.ts`                 |
+| Tell the page something changed                         | a table's trigger, or `emit()`                                        | `apps/office/src/lib/server/events.ts`                 |
+| Tell every run how the office works                     | `house()`                                                             | `apps/office/src/lib/server/house.ts`                  |
+| Run as the office, not as an Odd                        | `runAsOffice()`                                                       | `apps/office/src/lib/server/office-run.ts`             |
+| Give the page an Odd                                    | `toProfile()`                                                         | `apps/office/src/lib/server/profile.ts`                |
+| Reach an outside tool's server, for the owner or a run  | `upstream()`, through the run's gateway                               | `apps/office/src/lib/server/access.ts`                 |
+| Refuse a request from anywhere but the page             | `guardOffice`                                                         | `apps/office/src/lib/server/owner-page.ts`             |
+| Call the office from the page                           | `call()`, `stream()`, `follow()`                                      | `apps/office/src/lib/ui/api.ts`                        |
+| Fail a lint guard                                       | `report()`                                                            | `scripts/lib/files.ts`                                 |
+| Test against a database, the tool server, or the office | `pglite.ts`, `tool-server.ts`, `office-under-test.ts`                 | `packages/ledger/test/`, `apps/office/src/lib/server/` |
+
+## A system that keeps state
+
+Something the office keeps that changes as things happen, such as its work
+or the lessons, decides each change in one pure function and writes it in one
+transaction, as the 2026-11-11 `[arch]` decision in `docs/decisions/` says. A
+new one takes the same four parts:
+
+1. **Its states.** One union per stored thing, a parser that reads a row into
+   a state its type allows and refuses a row whose columns disagree, and a
+   serializer that writes every column back. The work's are in
+   `packages/ledger/src/work/state.ts`. A check in a migration holds each
+   rule for every new write, as `0033_work_checks` does.
+2. **Its events and deciders.** What can happen, as plain data, each with one
+   pure decider: no database, no clock. The work's are `WorkEvent` and
+   `DECIDERS`; the lessons' are `LessonCommand` and `decideLesson` in
+   `packages/ledger/src/lesson-rules.ts`. `test/pure-modules.test.ts` checks
+   that they load no database.
+3. **Its rules in a sequence test.** A test drives random events through the
+   system with `explore()`, keeps its own record of what is true, and says
+   each rule as an equality against that record.
+   `packages/ledger/test/work-sequences.test.ts` and
+   `lesson-sequences.test.ts` are the examples.
+4. **The shell.** `transition()` loads and locks the rows, asks the decider,
+   and writes the change, with ledger lines after the commit. The work's
+   entry is `transitionWork()`. A system with no row to lock takes a lock of
+   its own, as the lessons do per scope (`lockScopes` in `lessons.ts`).
 
 ## Adding a new kind
 
@@ -70,8 +106,8 @@ nothing fails, it says so: name that place in the pull request.
 Planned work starts where a "Later" line says, not here: the "Later" sections
 of `packages/ledger/CLAUDE.md`, `apps/office/src/lib/server/CLAUDE.md`,
 `apps/desktop/CLAUDE.md`, `scripts/CLAUDE.md` and `docs/CLAUDE.md` say what
-comes first for a run timeline (one row per run), Stop for a run, Claude
-Code's launch, a new office tool or AI tool, a release smoke test, splitting a
+comes first for a run timeline (one row per run), Stop for a run, a new
+office tool or AI tool, a release smoke test, splitting a
 big file, the size guard and a long guide file. The page pass is the last line
 of "Rules for this app" in `apps/office/CLAUDE.md`. Whoever does a "Later" item
 deletes its line, and whoever finds this page wrong fixes it in the same
@@ -82,11 +118,23 @@ change.
   `packages/ledger/src/desk-answers.ts`, which says what each answer does. A
   kind the owner answers on its own card (a reply, a filter, a folder, a call)
   gives `approve` a `by`, the line a bare yes gets, and its route approves it;
-  a plain yes (a `switch` ask) names its effects directly.
-- **A follow-up kind.** Start at `FOLLOW_UP_KINDS` in `schema.ts`. Check-types
-  fails at every `Record<FollowUpKind, ...>`, `AT_DRAFT` and
-  `SERVES_NO_THREAD` in `hand-offs.ts` among them, and at the switch in
+  a plain yes (a `switch`, `level` or `office_tool` ask) names its effects
+  directly. Check-types then fails at `TWINS` in
+  `packages/ledger/src/work/twins.ts`, the repeat guard's switch in
+  `raiseAsk` (`office-asks.ts`), `grantSetting` in `office-decide.ts`,
+  `carriedLinesOf` and `carryOutBrief` in
+  `apps/office/src/lib/server/follow-up-brief.ts`, `YES_SAID` in
+  `apps/office/src/lib/ui/yes-said.ts`, and `ASK_ROWS` in the office's
+  `named-tools.test.ts`.
+- **A follow-up kind.** Start at `FOLLOW_UP_KINDS` in
+  `packages/ledger/src/work/kinds.ts`. Check-types fails at every
+  `Record<FollowUpKind, ...>`, `AT_DRAFT` and `SERVES_NO_THREAD` beside it
+  among them, and at the switch in
   `apps/office/src/lib/server/follow-up-brief.ts`.
+- **A work event.** Start at `WorkEvent` in
+  `packages/ledger/src/work/events.ts`. Check-types fails at `WorkResults`
+  beside it and at `DECIDERS` in `work/decide.ts` until the event has its
+  decider.
 - **A desk item.** Start at `DESK_ITEMS` in `desk-answers.ts`. Check-types
   fails at `OWNER_ANSWERS`, `Item` in `DeskDrawer.svelte`, `replyBrief` and
   `openDelivered`.
@@ -129,7 +177,8 @@ change.
   under the tool it rides with. When it is offered is a field on its row,
   never a rule in its `mcp-*.ts` file, which registers such a tool behind `offered()`:
   `withGmail` only while the Odd holds Gmail, `withWrite` only while it holds
-  a service at Read and write, `inChat` only in a chat on the owner's words,
+  a service at Read and write, `withSkills` only while the owner attached a
+  skill to it, `inChat` only in a chat on the owner's words,
   `notToManager` never to the Office Manager.
   Whether the owner grants it is the `office_tools` row of `OWNER_GRANTS`.
   `hand-off-tool.test.ts` fails a registered tool that is neither listed nor

@@ -17,6 +17,7 @@
 import { error, json } from '@sveltejs/kit';
 import {
   currentPlatform,
+  currentSystem,
   AGENT_NAMES,
   AGENTS,
   agentsOn,
@@ -29,9 +30,9 @@ import {
   type Agent
 } from '@oddboro/ledger';
 import { writeEnv } from '@oddboro/ledger/env';
+import { computerWord } from '@oddboro/ledger/system-words';
 import {
   claudeSignInState,
-  computerWord,
   signInState,
   agentCommand,
   type SignInState
@@ -70,7 +71,7 @@ export const GET: RequestHandler = async () => {
   const platform = currentPlatform();
   return json({
     // The picker's word for this computer.
-    computer: computerWord(),
+    computer: computerWord(currentSystem()),
     office: officeAgent(),
     drawsLooks: officeDrawsLooks(),
     tools: await Promise.all(

@@ -129,6 +129,23 @@ test('a result from earlier work stays readable after the owner ends its thread'
   );
 });
 
+test("a project result's resume goes to the Odd that sent the work, not the thread's hub", async () => {
+  const work = await fixture('act');
+  const hub = await fixture('act');
+  const [thread] = await db
+    .insert(threads)
+    .values({ title: 'Shared project', hubId: hub.staffId, holderId: hub.staffId })
+    .returning();
+  await requestProject({ ...work, threadId: thread.id });
+  await claimProject(work.sessionId);
+  await finishProject(work.id, work.sessionId, 'See plan.md');
+  const pickups = await db.select().from(followUps).where(eq(followUps.threadId, thread.id));
+  assert.deepEqual(
+    pickups.map((f) => [f.kind, f.staffId]),
+    [['resume', work.staffId]]
+  );
+});
+
 test('an Odd at Act still waits for the owner unless its session lets it send without asking', async () => {
   const work = await fixture('act', false);
   assert.equal((await requestProject(work)).state, 'proposed');

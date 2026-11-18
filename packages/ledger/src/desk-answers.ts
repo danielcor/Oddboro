@@ -32,7 +32,7 @@ export function taskSaid(t: { steps: Step[]; note: string | null }): string {
 /**
  * What each run a task's end starts on the task's own work is told of other
  * work parked on that task. That work picks up in its own run at the same
- * moment (`wakeOnTask`), so without this line both runs did the parked work.
+ * moment (`wakeParked`), so without this line both runs did the parked work.
  * "This", not "this task": a carry-out's brief speaks of the ask, not of the
  * connect task that ended.
  */
@@ -59,8 +59,10 @@ export const askReplaced = (a: { status: AskStatus; reason: string | null }): bo
  * What reaches the Odd when the owner answers. A `none` names the Linear row
  * that would add it.
  *
- * - `approval_work`: what approving means, done by the function that approves
- *   that kind (`approveGoal`, `approvePlan`) before the answer goes back.
+ * - `approval_work`: what approving means, written in the transaction that
+ *   approves the ask by the function that approves that kind (`approveGoal`,
+ *   `approvePlan`). A goal's yes then puts the manager's planning run on the
+ *   goal's new work (`planGoal`).
  * - `carry_out`: a `carry_out` follow-up, to do what the ask or task waited on.
  * - `grant_access`: the access the ask names is granted (`grantAccess`). A tool
  *   already connected starts the work that waited on it (`carry_out`) at once;
@@ -69,19 +71,26 @@ export const askReplaced = (a: { status: AskStatus; reason: string | null }): bo
  *   (`giveFolder`), and the work that waited on it starts, once for each place
  *   a result goes back to.
  * - `turn_on`: the switches the ask names turned on with the yes
- *   (`turnOnSwitches`), and the work that waited on them starts, once for each
+ *   (`changeOwnTools`), and the work that waited on them starts, once for each
  *   place a result goes back to.
- * - `start_held`: the hand-off the ask held starts, as the ask is claimed.
+ * - `grant_setting`: the level or office tools the ask names change with the
+ *   yes, as the Settings tab changes them (`changeLevel`, `changeTools`), and
+ *   the work that waited on them starts, once for each place a result goes
+ *   back to.
+ * - `start_held`: the hand-off the ask held starts, as the ask is claimed,
+ *   unless the usage window holds it as it would a new one.
  * - `answer_window`: the usage window's answer (`answerWindow`).
  * - `answer_hand_offs`: the yes or no to more hand-offs goes to the thread's hub
  *   (`answerHandOffs`).
  * - `answer_back`: the answer itself goes to the hand-off or thread it was
- *   raised on (`answerLater`). Raised on neither, it reaches nobody.
+ *   raised on (`answerBack`). Raised on neither, it wakes the Odd that raised
+ *   it, once, as an `answered` run (`offWorkAnswer`); a goal's yes does not,
+ *   since its planning run follows it.
  * - `rework`: a `rework` follow-up, with what to change.
  * - `denied_lesson`: a `denied` follow-up, when the no carries a reason.
  * - `task_done`: a `task_done` follow-up, to pick up what waited on the task.
  * - `wake_parked`: the work a lead parked on the task picks up, told how the
- *   task ended (`wakeOnTask`).
+ *   task ended (`wakeParked`).
  * - `odd_leaves`: the Odd the ask names leaves the office (`removeOdd` in
  *   leaving.ts), after the answer went back, so leaving closes any run it started.
  * - `odd_returns`: the Odd the ask names comes back as it was (`bringBack`).
@@ -96,6 +105,7 @@ export type Effect =
   | 'grant_access'
   | 'give_folder'
   | 'turn_on'
+  | 'grant_setting'
   | 'start_held'
   | 'answer_window'
   | 'answer_hand_offs'
@@ -110,26 +120,23 @@ export type Effect =
   | 'give_standing'
   | { none: string };
 export type AskEffect = Exclude<Effect, 'task_done' | 'wake_parked'>;
-export type TaskEffect = Extract<
-  Effect,
-  'carry_out' | 'task_done' | 'answer_back' | 'wake_parked' | { none: string }
->;
+export type TaskEffect = Extract<Effect, 'carry_out' | 'task_done' | 'answer_back' | 'wake_parked'>;
 
 /**
- * Whether each effect of a task's end starts a run on the task's own work:
- * always, only when the task is on a piece of work (an answer goes back there,
- * and reaches nobody otherwise), or never. Each such run and the work parked
- * on the task are told of each other (`finishTask`), or both do the parked work.
+ * Whether each effect of a task's end starts a run of the task's own: always;
+ * on its work, else its Odd, as an answer does: it goes back to the work the
+ * task is on, to the lead that handed it when the task came on a hand-off,
+ * and on no work to the Odd that gave it, as an `answered` run, unless that
+ * Odd took the task off the desk; or never. Each such run and the work
+ * parked on the task are told of each other (`ownRunOf`), or both do the
+ * parked work.
  */
 export const OWN_RUN = {
   carry_out: 'always',
   task_done: 'always',
-  answer_back: 'on its work',
+  answer_back: 'on its work, else its Odd',
   wake_parked: 'never'
-} as const satisfies Record<
-  Exclude<TaskEffect, { none: string }>,
-  'always' | 'on its work' | 'never'
->;
+} as const satisfies Record<TaskEffect, 'always' | 'on its work, else its Odd' | 'never'>;
 
 export type AskAnswer = {
   /**
@@ -146,14 +153,8 @@ export type AskAnswer = {
    */
   iterate: readonly AskEffect[] | 'refused';
 };
-/**
- * An answer with no run to follow it, to an ask raised on no hand-off and no
- * thread, tells the Odd that asked nothing: a yes to a hire or a goal, and a
- * no with no reason.
- */
-const OFF_A_THREAD = { none: 'NEW-1715' };
 /** A no: the answer goes back, and its reason is a lesson for the Odd that asked. */
-const NO: readonly AskEffect[] = ['answer_back', 'denied_lesson', OFF_A_THREAD];
+const NO: readonly AskEffect[] = ['answer_back', 'denied_lesson'];
 const REWORK: readonly AskEffect[] = ['rework'];
 
 export const OWNER_ANSWERS = {
@@ -161,12 +162,12 @@ export const OWNER_ANSWERS = {
     approval: { approve: ['carry_out'], deny: NO, iterate: REWORK },
     access: { approve: ['grant_access'], deny: NO, iterate: REWORK },
     hire: {
-      approve: { by: 'Approve a hire by hiring', then: ['answer_back', OFF_A_THREAD] },
+      approve: { by: 'Approve a hire by hiring', then: ['answer_back'] },
       deny: NO,
       iterate: REWORK
     },
     // Setting the goal wakes the Office Manager to plan it, on the goal's thread.
-    goal: { approve: ['approval_work', 'answer_back', OFF_A_THREAD], deny: NO, iterate: REWORK },
+    goal: { approve: ['approval_work', 'answer_back'], deny: NO, iterate: REWORK },
     // A plan is always raised on its goal's thread, so its answer always reaches the lead.
     plan: {
       approve: ['approval_work', 'answer_back'],
@@ -183,7 +184,7 @@ export const OWNER_ANSWERS = {
     reply: {
       approve: {
         by: 'Send the reply, or save it to Gmail drafts',
-        then: ['answer_back', OFF_A_THREAD]
+        then: ['answer_back']
       },
       deny: NO,
       iterate: REWORK
@@ -191,7 +192,7 @@ export const OWNER_ANSWERS = {
     filter: {
       approve: {
         by: 'Create the filter from its card on the desk',
-        then: ['answer_back', OFF_A_THREAD]
+        then: ['answer_back']
       },
       deny: NO,
       iterate: REWORK
@@ -203,14 +204,17 @@ export const OWNER_ANSWERS = {
     },
     // Plain Approve is the desk's Turn on.
     switch: { approve: ['turn_on'], deny: NO, iterate: REWORK },
+    // Plain Approve is the desk's Raise to (level) or Turn on.
+    level: { approve: ['grant_setting'], deny: NO, iterate: REWORK },
+    office_tool: { approve: ['grant_setting'], deny: NO, iterate: REWORK },
     call: {
       approve: { by: 'Approve the call from its card on the desk', then: ['carry_out'] },
       deny: NO,
       iterate: REWORK
     },
-    remove: { approve: ['answer_back', OFF_A_THREAD, 'odd_leaves'], deny: NO, iterate: 'refused' },
+    remove: { approve: ['answer_back', 'odd_leaves'], deny: NO, iterate: 'refused' },
     bring_back: {
-      approve: ['answer_back', OFF_A_THREAD, 'odd_returns'],
+      approve: ['answer_back', 'odd_returns'],
       deny: NO,
       iterate: 'refused'
     },
@@ -233,7 +237,7 @@ export const OWNER_ANSWERS = {
       /** A task no Odd gave the owner. */
       noOdd: ['wake_parked']
     },
-    dropped: ['answer_back', 'wake_parked', { none: 'NEW-1703' }]
+    dropped: ['answer_back', 'wake_parked']
   } satisfies {
     done: Record<'fromAccess' | 'other' | 'noOdd', readonly TaskEffect[]>;
     dropped: readonly TaskEffect[];

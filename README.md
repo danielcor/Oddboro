@@ -6,6 +6,9 @@ A virtual office for one person, the owner. AI workers called Odds work on a
 pixel-art floor, and where each one stands tells you what it is doing. The office runs on your
 computer, a Mac, Linux or Windows, and its first Odd is the Office Manager you pick.
 
+[Watch the Oddboro launch demo or read the transcript](https://natesnewsletter.substack.com/p/oddboro-manage-multiple-ai-agents-launch).
+The replay shows how the Office Manager keeps track of work across agents.
+
 ## Get started
 
 The quickest way is the app, for a Mac, Windows or Linux, from
@@ -53,9 +56,10 @@ Use [project sessions](docs/project-sessions.md) to open a native Codex or Claud
   Postgres 15 or later with pgvector (in Docker with `npm run db:up`, or hosted,
   with the direct connection string, not a pooled one), put it in `.env` as
   `DATABASE_URL`.
-- [Ollama](https://ollama.com) with `nomic-embed-text` lets your Odds search the
-  ledger by meaning, and `uv` runs the tools that come from PyPI. The office
-  says when either is missing.
+- Ledger search by meaning needs the search model, a 140 MB download from
+  Setup. The office runs it itself, so nothing you search leaves your
+  computer. Until then the ledger is searched by its words.
+- `uv` runs the tools that come from PyPI. The office says when it is missing.
 
 ## Work on it
 

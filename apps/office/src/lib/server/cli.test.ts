@@ -2,7 +2,7 @@
 // Run with `npm test -w @oddboro/office`.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { streamTools } from './cli.ts';
+import { streamTools } from './claude.ts';
 import { codexReader } from './codex.ts';
 import { toolWords } from '../staff/work.ts';
 

@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { db, toolServer } from './tool-server.ts';
 
-const { asks, connectors, grants, staff, tasks } = await import('../src/schema.ts');
+const { asks, connectors, followUps, grants, staff, tasks } = await import('../src/schema.ts');
 const { eq } = await import('drizzle-orm');
 const { STARTER_TOOLS } = await import('../src/tools.ts');
 const { addGoogleAccount, ask, connector, decideAsk, desk, googleConnectors, signedInAs } =
@@ -226,4 +226,49 @@ test('an Odd that needs two mailboxes asks for both at once, before either is co
     'Connect Google Drive (read)',
     'Connect another Google Drive account (read)'
   ]);
+});
+
+test('two connection-only requests and a separate approval start the proposed work once', async () => {
+  const client = await toolServer('jo', { RUN_KEY: 'k-one-action' });
+  const ids: number[] = [];
+  for (const connector of ['gmail', 'brain']) {
+    await db.update(connectors).set({ readyAt: new Date() }).where(eq(connectors.id, connector));
+    const reply = await client.callTool({
+      name: 'ask_for_access',
+      arguments: {
+        connector,
+        level: 'write',
+        why: 'For a separately proposed invoice.',
+        connect_only: true
+      }
+    });
+    assert.notEqual(reply.isError, true, said(reply));
+    const id = idOf(said(reply));
+    assert.match((await ask(id))!.ifApproved, /only connects the tool/);
+    ids.push(id);
+  }
+  const reply = await client.callTool({
+    name: 'raise_ask',
+    arguments: {
+      title: 'Save the invoice total',
+      why: 'The receipts are ready.',
+      if_approved: 'Record the total in the prepared services.'
+    }
+  });
+  assert.notEqual(reply.isError, true, said(reply));
+  const action = idOf(said(reply));
+  for (const id of [...ids, action]) await decideAsk(id, 'approve', null);
+  const work = await db.select().from(followUps).where(eq(followUps.staffId, 'jo'));
+  assert.deepEqual(
+    work.filter((f) => f.askId && [...ids, action].includes(f.askId)).map((f) => f.askId),
+    [action]
+  );
+  const access = await db.select().from(grants).where(eq(grants.staffId, 'jo'));
+  assert.deepEqual(
+    access
+      .filter((g) => g.level === 'act')
+      .map((g) => g.connectorId)
+      .sort(),
+    ['brain', 'gmail']
+  );
 });

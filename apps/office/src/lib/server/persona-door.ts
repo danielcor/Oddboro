@@ -39,7 +39,13 @@ export type DoorAnswer =
   | { outcome: 'answered'; frame?: string; reply: string; caveat?: string }
   | { outcome: 'refused_content'; decline?: string }
   | { outcome: 'refused_budget'; retryAfterSeconds?: number }
-  | { outcome: Exclude<DoorOutcome, 'answered' | 'refused_content' | 'refused_budget'> }
+  | { outcome: 'interrupted'; partialReply?: string }
+  | {
+      outcome: Exclude<
+        DoorOutcome,
+        'answered' | 'refused_content' | 'refused_budget' | 'interrupted'
+      >;
+    }
   | { outcome: 'grant' };
 
 /** One earlier exchange, in the door's own shape: it drops any other silently. */
@@ -89,6 +95,8 @@ function answerOf(outcome: DoorOutcome, b: Record<string, unknown>): DoorAnswer 
     }
     case 'refused_content':
       return { outcome, decline: text((b.presentation as { text?: unknown } | undefined)?.text) };
+    case 'interrupted':
+      return { outcome, partialReply: text(b.partialReply) };
     case 'refused_budget': {
       const after = (b.refusal as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
       return { outcome, ...(typeof after === 'number' ? { retryAfterSeconds: after } : {}) };

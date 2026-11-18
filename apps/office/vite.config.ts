@@ -2,9 +2,11 @@ import { sentrySvelteKit } from '@sentry/sveltekit/vite';
 import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
+import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
+import { fromThisComputer, NOT_THIS_COMPUTER } from './src/lib/server/this-computer.ts';
 
 /** The repository's root folder, where every uploaded map's sources start. */
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
@@ -48,12 +50,51 @@ export function buildOptions(env: NodeJS.ProcessEnv) {
   };
 }
 
+/** True when a request to Vite's server, or its websocket, comes from this computer. */
+function nodeFromThisComputer(req: IncomingMessage): boolean {
+  const header = req.headers['x-forwarded-for'];
+  return fromThisComputer({
+    forwardedFor: Array.isArray(header) ? header.join(',') : header,
+    peer: req.socket.remoteAddress ?? ''
+  });
+}
+
+/**
+ * Under `vite dev`, which setup and the login service run, Vite serves its
+ * own routes (the source files, `/@vite/client`) and its live-reload
+ * websocket before the office's own check (`guardOffice`) sees a request.
+ * So the check's first rule runs here as well, at that earlier door: anything
+ * not from this computer gets 403, and its websocket is closed before Vite's
+ * handler sees it.
+ */
+export function onlyThisComputer(): Plugin {
+  return {
+    name: 'oddboro:only-this-computer',
+    apply: 'serve',
+    enforce: 'pre',
+    // Three of Vite's middlewares run before this one: reject-invalid, CORS and host check.
+    // None serves content, and CORS hands a preflight on because SvelteKit sets `preflightContinue`.
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (nodeFromThisComputer(req)) return next();
+        res.statusCode = 403;
+        res.end(NOT_THIS_COMPUTER);
+      });
+      // Prepended, so it runs before Vite's own websocket handler.
+      server.httpServer?.prependListener('upgrade', (req, socket) => {
+        if (!nodeFromThisComputer(req)) socket.destroy();
+      });
+    }
+  };
+}
+
 /**
  * Vite's dev server has a route, `/__open-in-editor`, that opens a file in an
  * editor, and it runs before the office's own check (`guardOffice`). Nothing
  * in the office uses it; only Vite's error overlay links there. So it is
- * refused outright, rather than through the office's check, which would bring
- * the server's modules into this config.
+ * refused outright, for this computer too. This config imports only the
+ * office's loopback rule (this-computer.ts, which uses only `node:net`),
+ * never the server's other modules.
  */
 export function noEditorLaunch(): Plugin {
   return {
@@ -88,14 +129,18 @@ export function siteUrl(env: Record<string, string | undefined> = process.env): 
 // they reload on save.
 const port = Number(process.env.ODDBORO_PORT) || 4500;
 export default defineConfig(({ command }) => ({
-  // Sentry's plugin goes before SvelteKit's, as Sentry's setup asks.
+  // The loopback rule first, the earliest door. Sentry's plugin goes before
+  // SvelteKit's, as Sentry's setup asks.
   plugins: [
+    onlyThisComputer(),
     noEditorLaunch(),
     tailwindcss(),
     sentrySvelteKit(buildOptions(process.env)),
     sveltekit({ adapter: adapter() })
   ],
   define: { __SITE_URL__: JSON.stringify(siteUrl()) },
+  // The first file picked in Hire must not reload the page while Vite prepares its parser.
+  optimizeDeps: { include: ['yaml'] },
   // The office's addresses through Caddy (lib/server/address.ts).
   server: {
     port,

@@ -72,6 +72,8 @@ docs/           Decisions, hard rules, the office design, and the backlog.
 data/           Gitignored. The private-words list and local-only files. Never tracked.
 docker-compose.yml  Postgres 17 with pgvector, on 127.0.0.1 only.
 .github/workflows/ci.yml       Every pull request to main, and every push to it, runs the checks, Mac, Linux and Windows.
+.github/workflows/app-smoke.yml  Every pull request that changes the app, or a run by hand, installs it and smoke-tests it.
+.github/workflows/site.yml     A change to the site or the docs runs the guards and the site's checks and build, on Linux.
 .github/workflows/release.yml  Every merge to main that changes the app redrafts the next release, Mac, Linux and Windows.
 .github/workflows/codeql.yml   Code scanning, for only the languages a change touches.
 ```
@@ -99,13 +101,13 @@ npm run shell -w @oddboro/desktop    # the desktop shell against a running offic
 
 ## Ports
 
-| App      | Port  | Where                                                        |
-| -------- | ----- | ------------------------------------------------------------ |
-| office   | 4500  | 127.0.0.1 only                                               |
-| site     | 4501  | dev and preview; ships as static files                       |
-| desktop  | 4500  | the app's own office; `ODDBORO_PORT` moves it                |
-| database | 54329 | 127.0.0.1 only, the office's own; `ODDBORO_DB_PORT` moves it |
-| postgres | 5432  | 127.0.0.1 only, in Docker, when `.env` names it              |
+| App      | Port  | Where                                                                                                                  |
+| -------- | ----- | ---------------------------------------------------------------------------------------------------------------------- |
+| office   | 4500  | 127.0.0.1 only                                                                                                         |
+| site     | 4501  | dev and preview; ships as static files                                                                                 |
+| desktop  | 4500  | the app's own office; `ODDBORO_PORT` moves it                                                                          |
+| database | 54329 | Windows only, 127.0.0.1, the office's own; `ODDBORO_DB_PORT` moves it. A Mac and Linux use a socket in the office home |
+| postgres | 5432  | 127.0.0.1 only, in Docker, when `.env` names it                                                                        |
 
 ## Decisions
 

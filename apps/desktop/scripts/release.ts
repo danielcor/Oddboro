@@ -40,6 +40,7 @@
 // from ODDBORO_UPDATE_URL, and nothing goes to Sentry. Never ship a --test
 // build.
 import { preparePty } from '../../../scripts/prepare-pty.mjs';
+import { searchRuntimeFiles } from './search-runtime.ts';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -363,7 +364,8 @@ function buildMac(version: string): void {
   stage();
 
   // The hardened Node sidecar loads only libraries carrying the app's team ID.
-  for (const file of preparePty(join(DESKTOP, 'stage'))) {
+  const stage = join(DESKTOP, 'stage');
+  for (const file of [...preparePty(stage), ...searchRuntimeFiles(stage)]) {
     run('codesign', ['--force', '--options', 'runtime', '--timestamp', '--sign', IDENTITY, file]);
     run('codesign', ['--verify', '--strict', file]);
   }

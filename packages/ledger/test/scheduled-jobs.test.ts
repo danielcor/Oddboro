@@ -7,7 +7,6 @@ import { staff } from '../src/schema.ts';
 import { nextRun, runTime } from '../src/time.ts';
 import type { JobRow, RunRow } from '../src/office.ts';
 
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const O = await import('../src/office.ts');
 await db.insert(staff).values({
   id: 'writer',
@@ -18,6 +17,25 @@ await db.insert(staff).values({
   portrait: 'a',
   permission: 'draft',
   desk: 'Prepare the edition.'
+});
+
+test('two edits to the same job description keep one change and its history', async () => {
+  const was = (await O.staffer('writer'))!.desk;
+  const edits = ['Prepare the morning edition.', 'Prepare the evening edition.'];
+  const outcomes = await Promise.allSettled(
+    edits.map((text) => O.setDescription('writer', text, { owner: true, was }))
+  );
+  const saved = (await O.staffer('writer'))!.desk;
+  assert.ok(edits.includes(saved));
+  assert.deepEqual(outcomes[edits.indexOf(saved)], { status: 'fulfilled', value: true });
+  const other = outcomes.find((r) => r.status === 'rejected');
+  assert.match(String(other?.reason), /changed since you opened it/);
+  const history =
+    await sql`select body from ledger where title = 'Edited Writer''s job description'`;
+  assert.deepEqual(
+    history.map((row) => row.body),
+    [`Before:\n${was}\n\nAfter:\n${saved}`]
+  );
 });
 
 test('two clocks claim one due time and a repeated finish keeps one result', async () => {

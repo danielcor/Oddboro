@@ -20,17 +20,21 @@ export function inProgress(): Record<string, Work[]> {
   return work;
 }
 
-export function working(): Record<string, string> {
-  const labels: Record<string, string> = {};
-  for (const [id, work] of Object.entries(inProgress())) {
-    const now = work.filter((w) => !w.queued).map((w) => w.label);
-    if (now.length) labels[id] = now.length > 1 ? `${now[0]} +${now.length - 1} more` : now[0];
-  }
-  return labels;
+/**
+ * The Odds replying to the owner in chat: an entry with a turn, which only a
+ * chat reply to the owner's message has. Not `chatRun`, which also counts a
+ * new hire's hello: that hello is work through `slot`, labelled "Saying
+ * hello", and shows as running, not as a reply the owner waits on.
+ */
+export function chatting(): string[] {
+  const ids = new Set<string>();
+  for (const run of runsGoing.values()) if (run.turnId) ids.add(run.staffId);
+  return [...ids];
 }
 
-function show() {
-  emit({ type: 'working', working: working(), inProgress: inProgress() });
+/** Tells every page what runs now, after a run is reserved, steps or ends. */
+export function show(): void {
+  emit({ type: 'working', chatting: chatting(), inProgress: inProgress() });
 }
 
 export function chatRun(id: string): LiveRun | undefined {
@@ -46,6 +50,11 @@ export function stopRuns(id: string): void {
   for (const run of runsGoing.values()) if (run.staffId === id) run.stop.abort('left');
 }
 
+/** Stop every run, as the office stops to restore a backup. */
+export function stopEveryRun(): void {
+  for (const run of runsGoing.values()) run.stop.abort();
+}
+
 export function workAbout(leadId: string, key: string): WorkAbout | undefined {
   return [...runsGoing.values()].find(
     (r) => !r.work?.queued && r.work?.about?.leadId === leadId && r.work.about.key === key
@@ -55,7 +64,7 @@ export function workAbout(leadId: string, key: string): WorkAbout | undefined {
 /** A chat uses its own session. Only background work waits for these slots. */
 export async function slot<T>(
   id: string,
-  about: Pick<Work, 'kind' | 'label' | 'detail' | 'askId' | 'about'>,
+  about: Pick<Work, 'kind' | 'label' | 'detail' | 'askId' | 'about' | 'handOffId'>,
   fn: (onEvent: (e: ChatEvent) => void, runId: string) => Promise<T>,
   options: { greeting?: true } = {}
 ): Promise<T> {

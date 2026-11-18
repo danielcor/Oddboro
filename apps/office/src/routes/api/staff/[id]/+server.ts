@@ -2,12 +2,14 @@
 // after the page's own confirm (`removeOdd` in the ledger). It is soft: the
 // Office Manager can bring it back, with the owner's yes.
 // PATCH changes a staffer's permission level, coding tool, account, model or thinking level, grant or remove one
-// office tool, switch Run commands or Browse the web, or give or take back a
-// folder outside the office. Only the owner does this, from the card. A move
+// office tool, switch Run commands or Browse the web, give or take back a
+// folder outside the office, or change what happens when another Odd hands it
+// work (`actsOnHandOffs`), which a move up to Act also takes with it. Only the owner does this, from the card. A move
 // to another tool can turn Run commands on with it: the one click the Access
 // tab offers under a switch the Odd's own tool cannot follow.
 import { error, json } from '@sveltejs/kit';
 import {
+  ActCheckNeeded,
   currentPlatform,
   agentsOn,
   offeredAgent,
@@ -19,6 +21,7 @@ import {
   setAccount,
   setFolder,
   setOwnTool,
+  setActsOnHandOffs,
   setPermission,
   setTool,
   staffer,
@@ -104,9 +107,22 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
     if (set) return json({ warning: set.warning });
     return json({ ok: true });
   }
+  const acts = typeof b.actsOnHandOffs === 'boolean' ? b.actsOnHandOffs : undefined;
+  if (b.permission === undefined && acts !== undefined) {
+    const set = await setActsOnHandOffs(params.id, acts);
+    if (set) error(400, set.refused);
+    return json({ ok: true });
+  }
   const permission = parseLevel(b.permission);
   if (!permission) error(400, 'Pick read, draft or act');
-  await setPermission(params.id, permission);
+  try {
+    // A move up to Act takes the owner's choice for work from colleagues; left out, the stored one stays.
+    await setPermission(params.id, permission, acts);
+  } catch (e) {
+    // Act waits for the owner's Act check; the page shows it on this answer.
+    if (e instanceof ActCheckNeeded) error(409, e.message);
+    throw e;
+  }
   return json({ ok: true });
 };
 

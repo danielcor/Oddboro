@@ -37,9 +37,7 @@ Object.assign(process.env, {
   ODDBORO_DB_PORT: String(port),
   // A file that does not exist, so no .env reaches this office.
   ODDBORO_ENV: join(folder, 'none.env'),
-  DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,
-  ODDBORO_LOCAL_DB: '1',
-  OLLAMA_URL: 'http://127.0.0.1:9'
+  ODDBORO_LOCAL_DB: '1'
 });
 const fake = await fakeNewAltitude();
 const { startLocalDatabase } = await import('@oddboro/ledger/local-db');
@@ -155,3 +153,19 @@ for (const code of [
       [refresh]
     );
   });
+
+test('a service refusal shows the next step for the reason the provider returned', async () => {
+  const { load } = await import('../../routes/connect/callback/+page.server.ts');
+  for (const [code, words] of [
+    ['invalid_scope', 'problem in Oddboro'],
+    ['invalid_scope', 'invalid_scope'],
+    ['temporarily_unavailable', 'Wait a little'],
+    ['new_provider_code', 'new_provider_code']
+  ]) {
+    const url = new URL(`http://localhost/connect/callback?error=${code}`);
+    const result = await load({ url } as Parameters<typeof load>[0]);
+    assert.ok(result);
+    assert.equal(result.ok, false);
+    assert.ok(result.message.includes(words), result.message);
+  }
+});

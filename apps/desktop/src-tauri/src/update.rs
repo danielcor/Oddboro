@@ -10,8 +10,6 @@
 //! On Windows the updater runs the new version's installer and ends this app
 //! itself, and the installer opens the new version when it is done.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -85,12 +83,11 @@ pub fn on_launch(app: &AppHandle, log: &Path, show: ShowUpdating) -> bool {
     }
 }
 
-/// What the watcher needs: the app, the server's port and update token, the
-/// log, and how to show the owner it is updating.
+/// What the watcher needs: the app, the server's port, the log, and how to
+/// show the owner it is updating. Its requests carry the current key.
 pub struct Watch {
     pub app: AppHandle,
     pub port: u16,
-    pub token: String,
     pub log: PathBuf,
     pub show: ShowUpdating,
 }
@@ -124,11 +121,11 @@ pub fn watch(w: Watch) {
             }
             Ok(None) => {
                 server::note(&w.log, "update check: this is the newest version");
-                ask(w.port, &w.token, "POST", Some(&json!({ "checked": true })));
+                ask(w.port, "POST", Some(&json!({ "checked": true })));
             }
             Err(e) => {
                 server::note(&w.log, &format!("update check failed: {e}"));
-                ask(w.port, &w.token, "POST", Some(&json!({ "failed": e })));
+                ask(w.port, "POST", Some(&json!({ "failed": e })));
             }
         }
     });
@@ -145,11 +142,11 @@ pub fn check_now() {
 /// says to install. A server that restarted forgets the update, so the shell
 /// tells it again.
 fn hand_over(w: &Watch, update: &Update, bytes: &[u8], checks: &Receiver<()>) {
-    let (app, port, token, log) = (&w.app, w.port, w.token.as_str(), w.log.as_path());
+    let (app, port, log) = (&w.app, w.port, w.log.as_path());
     let ready =
         json!({ "version": update.version, "notes": update.body.clone().unwrap_or_default() });
     loop {
-        let answer = ask(port, token, "GET", None);
+        let answer = ask(port, "GET", None);
         let knows = answer.as_ref().is_some_and(|a| {
             a["ready"] == true && a["version"].as_str() == Some(update.version.as_str())
         });
@@ -157,7 +154,7 @@ fn hand_over(w: &Watch, update: &Update, bytes: &[u8], checks: &Receiver<()>) {
             break;
         }
         if !knows {
-            ask(port, token, "POST", Some(&ready));
+            ask(port, "POST", Some(&ready));
         }
         // A check now changes nothing while a version waits to install.
         while checks.try_recv().is_ok() {}
@@ -303,32 +300,9 @@ fn running(pid: u32) -> bool {
     }
 }
 
-/// One request to the server's `/api/update`, with the token that marks it as
-/// the shell's. HTTP/1.0, so the answer comes whole, never chunked.
-fn ask(port: u16, token: &str, method: &str, body: Option<&Value>) -> Option<Value> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let body = body.map(Value::to_string).unwrap_or_default();
-    let request = format!(
-        "{method} /api/update HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nX-Oddboro-Update-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).ok()?;
-    let (_, json) = answer.split_once("\r\n\r\n")?;
-    serde_json::from_str(json).ok()
-}
-
-/// A fresh secret for this run, so only this shell can tell the server an
-/// update is ready. Empty if the system has no randomness to give: the server
-/// then takes no update requests at all.
-pub fn token() -> String {
-    let mut bytes = [0u8; 16];
-    if getrandom::fill(&mut bytes).is_err() {
-        return String::new();
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// One request to the server's `/api/update`, with the current key, which
+/// marks it as the shell's. None before Node has started.
+fn ask(port: u16, method: &str, body: Option<&Value>) -> Option<Value> {
+    let key = crate::key::current()?;
+    server::call(port, &key, method, "/api/update", body)
 }

@@ -8,10 +8,13 @@
 // first piece from the goal's lead, whom approving the hire wakes. The tool it
 // runs on, the account it signs in with there, its model and how hard it
 // thinks are stored with the row, so its hello and every run after go through
-// them. Left out, each is the office's.
+// them. Left out, each is the office's. The MCP servers an imported Claude
+// Code agent file listed become access asks, never access (`askForImported`).
 import { error, json } from '@sveltejs/kit';
 import {
   account as accountRow,
+  ACT_CHECK_NEEDED,
+  actCheckPassed,
   addJob,
   AGENT_NAMES,
   agentsOn,
@@ -30,6 +33,7 @@ import {
 } from '@oddboro/ledger';
 import { parseSchedule } from '#lib/server/schedule.ts';
 import { firstDay } from '#lib/server/staff.ts';
+import { askForImported, serversFrom } from '#lib/server/imported-servers.ts';
 import { giveIntake } from '#lib/server/files.ts';
 import { currentOffice } from '#lib/server/space.ts';
 import { drawnFrom, problemsWith } from '#lib/server/looks.ts';
@@ -47,6 +51,10 @@ type Body = Partial<Record<'name' | 'role' | 'room' | 'permission' | 'remit' | '
   look?: unknown;
   portraitPx?: unknown;
   newParts?: unknown;
+  /** At Act, the owner's choice for work another Odd hands the hire. */
+  actsOnHandOffs?: unknown;
+  /** The MCP servers its imported Claude Code agent file listed: each that asks becomes an access ask. */
+  servers?: unknown;
   job?: {
     name?: unknown;
     instructions?: unknown;
@@ -62,7 +70,7 @@ export const POST: RequestHandler = async ({ request }) => {
   const name = text(b.name, LIMITS.name);
   const role = text(b.role, LIMITS.role);
   const remit = text(b.remit, LIMITS.remit);
-  const desk = text(b.desk, 20_000);
+  const desk = text(b.desk, LIMITS.desk);
   const drawn = drawnFrom(b);
   const office = await currentOffice();
   const rooms = new Set(office.world.rooms.map((r) => r.id.split('#')[0]));
@@ -75,6 +83,8 @@ export const POST: RequestHandler = async ({ request }) => {
   if (problems.length) error(400, problems.join('; '));
   if (!rooms.has(room)) error(400, 'Pick a room on the floor');
   if (!permission) error(400, 'Pick read, draft or act');
+  // A hire at Act waits for the owner's Act check (`hire` refuses it too).
+  if (permission === 'act' && !(await actCheckPassed())) error(409, ACT_CHECK_NEEDED);
   // Left out, the hire runs on the column's default, Claude Code.
   const agent = b.agent === undefined ? undefined : offeredAgent(b.agent, currentPlatform());
   if (b.agent !== undefined && !agent)
@@ -122,7 +132,8 @@ export const POST: RequestHandler = async ({ request }) => {
       tools,
       look: drawn.look,
       portraitPx: drawn.portraitPx,
-      newParts: drawn.newParts
+      newParts: drawn.newParts,
+      actsOnHandOffs: b.actsOnHandOffs === true
     });
   } catch (e) {
     error(400, e instanceof Error ? e.message : String(e));
@@ -136,6 +147,10 @@ export const POST: RequestHandler = async ({ request }) => {
       report: b.job.report === true,
       missed: MISSED_RUNS.find((m) => m === b.job?.missed)
     });
+  // Asked before its first day, so the hire finds them on the desk and does not ask again.
+  await askForImported(row.id, row.name, serversFrom(b.servers)).catch((e: unknown) =>
+    console.error(`[hire] access asks for ${row.id}: ${e instanceof Error ? e.message : e}`)
+  );
   // The hire is made, so what fails after this is logged, not a failed hire. A
   // goal gone since leaves the proposal open on the desk: the hire does not serve it.
   if (from?.hire?.intakeFile)

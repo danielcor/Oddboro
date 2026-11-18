@@ -1,5 +1,5 @@
 // What must hold after every path a test drives: one goal is one thread, and
-// an Odd that serves a goal and has no job leads none (`openThread`). The
+// an Odd that serves a goal and has no job leads none (`assertMayLead`). The
 // manager leads every goal's thread, so it is never counted. A test file
 // passes the `sql` of whichever database it runs on, and checks this after
 // each test, so a path that breaks it fails wherever it is.

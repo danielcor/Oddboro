@@ -176,6 +176,7 @@ test('a handed-over run keeps its own commands, web and folders; a write grant w
     level: 'act',
     remit: '',
     office: [],
+    actsOnHandOffs: false,
     outside: [
       {
         connector: { id: 'notion', name: 'Notion', readTools: ['search'] } as ConnectorRow,
@@ -436,9 +437,10 @@ test('raise_ask sends an outside tool to ask_for_access, a folder to ask_for_fol
   const description = tools.find((t) => t.name === 'raise_ask')?.description ?? '';
   const { commands, web } = W.SWITCH_NAMES;
   assert.ok(
-    description.includes(
-      `For an outside tool, use ask_for_access; for a folder on this computer, ask_for_folder; for ${commands} or ${web}, see my_access;`
-    ),
+    description.includes('For an outside tool, use ask_for_access.') &&
+      description.includes(
+        `For a folder on this computer, use ask_for_folder; for ${commands} or ${web}, see my_access;`
+      ),
     description
   );
 });
@@ -552,7 +554,7 @@ test('a run off its threads hands off and names which thread it raises for, a ru
   });
 });
 
-test("office_report says where a colleague's level is set on that Odd's card, and ask_for_access above the level says where the Odd's own is", async () => {
+test("office_report says where a colleague's level is set on that Odd's card, and ask_for_access above the level tells the Odd to ask with ask_for_level", async () => {
   const r = await manager.callTool({ name: 'office_report', arguments: {} });
   const text = (r.content as { type: string; text: string }[])[0]?.text ?? '';
   const report = JSON.parse(text) as { staff: { id: string; outsideTools?: string[] }[] };

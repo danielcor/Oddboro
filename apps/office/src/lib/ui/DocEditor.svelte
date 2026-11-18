@@ -41,6 +41,14 @@
   const dirty = $derived(draft !== saved);
   $effect(() => ondirty?.(dirty));
 
+  /** Open a proposed replacement for review. Keep any unsaved edit. */
+  export function review(next: string): boolean {
+    if (dirty || busy) return false;
+    draft = next;
+    mode = 'edit';
+    return true;
+  }
+
   export async function save(): Promise<boolean> {
     if (busy) return false;
     busy = true;

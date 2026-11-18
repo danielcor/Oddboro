@@ -9,7 +9,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import Pixel from './Pixel.svelte';
   import type { StaffProfile } from '../staff/roster.ts';
-  import type { Work } from '../staff/work.ts';
+  import { railCount, railRing, tagWords, type ReaderProps } from '../staff/odd-now.ts';
 
   // Every Odd on a rail along the end edge of the screen: a ⌘K button on top,
   // then each Odd's portrait, with its count of work in progress or a ring
@@ -24,12 +24,10 @@
   // panel is open.
   type Props = {
     staff: StaffProfile[];
-    /** Staffer id to what it is doing now, in words. */
-    status: Record<string, string>;
-    /** Staffers with something on the owner's desk. */
-    waiting: Set<string | null>;
-    /** Staffer id to its work in progress. */
-    inProgress: Record<string, Work[]>;
+    /** Each Odd's state, by id. */
+    nowOf: ReaderProps['nowOf'];
+    /** Each Odd on the floor, to the room it walks to, if any. One with no entry has not arrived. */
+    headings: Record<string, string | undefined>;
     /** The Odd whose panel is open, marked on the rail. */
     selected?: string;
     /** Changes to widen the rail with the cursor in its search, as ⌘K does. */
@@ -45,9 +43,8 @@
   };
   let {
     staff,
-    status,
-    waiting,
-    inProgress,
+    nowOf,
+    headings,
     selected,
     find,
     searching = false,
@@ -221,7 +218,8 @@
        64 px rail exactly. -->
   <ul class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-x-hidden overflow-y-auto px-2 py-1.5">
     {#each shown as p, i (p.id)}
-      {@const busy = inProgress[p.id]?.length ?? 0}
+      {@const now = nowOf(p.id)}
+      {@const busy = now ? railCount(now) : 0}
       {@const on = selected === p.id}
       <li>
         <button
@@ -230,7 +228,7 @@
             : 'hover:bg-raise'} {typing && i === active ? 'ring-1 ring-sea/70' : ''}"
           aria-label={`${p.name}, ${p.role}`}
           aria-current={on ? 'true' : undefined}
-          title={`${p.name}, ${p.role}: ${status[p.id] ?? 'Arriving'}`}
+          title={`${p.name}, ${p.role}: ${now && p.id in headings ? tagWords(now, headings[p.id]) : 'Arriving'}`}
           onclick={() => pick(p.id)}
         >
           {#if open}
@@ -244,9 +242,8 @@
               {...portrait(p)}
               scale={1}
               label={p.name}
-              class="flex size-10 items-center justify-center overflow-hidden rounded-lg bg-sea-deep {waiting.has(
-                p.id
-              )
+              class="flex size-10 items-center justify-center overflow-hidden rounded-lg bg-sea-deep {now &&
+              railRing(now)
                 ? 'ring-2 ring-ember'
                 : ''}"
             />

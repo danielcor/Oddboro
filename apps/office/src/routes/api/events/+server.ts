@@ -2,7 +2,7 @@
 // events. Pushed when something happens, silent otherwise.
 import { bus, listen, type OfficeEvent } from '#lib/server/events.ts';
 import { pageClosed, pageOpened } from '#lib/server/health.ts';
-import { inProgress, working } from '#lib/server/staff.ts';
+import { chatting, inProgress } from '#lib/server/staff.ts';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = ({ request }) => {
@@ -13,7 +13,7 @@ export const GET: RequestHandler = ({ request }) => {
       const encoder = new TextEncoder();
       const send = (e: OfficeEvent) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
-      send({ type: 'working', working: working(), inProgress: inProgress() });
+      send({ type: 'working', chatting: chatting(), inProgress: inProgress() });
       bus.on('event', send);
       pageOpened();
       // Both the abort and cancel call it, so the page count drops once.

@@ -12,12 +12,23 @@ import {
   isNotNull,
   isNull,
   max,
-  ne,
   or,
-  sql
+  sql,
+  type SQL
 } from 'drizzle-orm';
 import { db } from './db.ts';
-import { anyStaffer, record } from './office.ts';
+import {
+  decideLesson,
+  dropped,
+  OPEN_LESSON,
+  onlyIn,
+  plain,
+  type LessonChange,
+  type LessonCommand,
+  type LessonRow,
+  type LessonWork
+} from './lesson-rules.ts';
+import { anyStaffer } from './office.ts';
 import {
   attachments,
   followUps,
@@ -28,9 +39,11 @@ import {
   type LessonHow,
   type LessonStatus
 } from './schema.ts';
-import { addFollowUp } from './threads.ts';
+import type { Tx } from './threads.ts';
+import { transitionWork } from './work/apply.ts';
+import { transition } from './transition.ts';
 
-export type LessonRow = typeof lessons.$inferSelect;
+export { GUESS_DAYS, LESSON_CAP, type LessonRow } from './lesson-rules.ts';
 /** How often a lesson changed one Odd's work. */
 export type LessonUse = Pick<typeof lessonUses.$inferSelect, 'uses' | 'lastUsedAt'>;
 /** How a lesson reads: its status, or `dropped` for a guess the owner did not keep in time. */
@@ -59,21 +72,10 @@ export type WhyReplaced = (typeof WHY_REPLACED)[number];
 
 /** An Odd says a lesson changed its work this many times, then stops saying so. */
 export const CITE_FIRST = 3;
-/**
- * Live and waiting lessons an Odd may keep in one scope, so a run's prompt
- * stays short. A dropped guess does not count.
- */
-export const LESSON_CAP = 25;
-/** Days a guess waits for the owner's Keep before it drops. */
-export const GUESS_DAYS = 7;
 /** A quote this short could be found in almost anything the owner wrote. */
 export const QUOTE_MIN_WORDS = 3;
 /** Where a lesson applies is a few plain words, like "reports" or "family plans". */
 export const APPLIES_TO_MAX = 60;
-
-/** Where a lesson applies, as its lines say it: nothing when it applies everywhere. */
-const onlyIn = (l: Pick<LessonRow, 'appliesTo'>) =>
-  l.appliesTo ? ` (only in: ${l.appliesTo})` : '';
 
 /**
  * A live lesson as a run's prompt lists it, kept on `day`. The office fills
@@ -110,14 +112,6 @@ export function editShown(before: string, now: string): EditShown {
     now: now.slice(from, from + EDIT_CHARS)
   };
 }
-
-/** Words compared without case, spacing, quote marks or end punctuation. */
-const plain = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[‘’“”"'`]/g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/^[\s.,!?;:]+|[\s.,!?;:]+$/g, '');
 
 /** Words alone: no case, quote marks or punctuation, one space between. */
 const wordsOf = (s: string) =>
@@ -169,14 +163,6 @@ export function keptAs(
 }
 
 /**
- * A guess the owner did not keep within GUESS_DAYS. It is worked out as the
- * lesson is read, so nothing runs on a timer to drop it, and Keep after all
- * still makes it live.
- */
-export const dropped = (l: Pick<LessonRow, 'status' | 'createdAt'>) =>
-  l.status === 'waiting' && Date.now() - l.createdAt.getTime() > GUESS_DAYS * 86_400_000;
-
-/**
  * Whether a follow-up's `note` is the owner's own words, which a lesson may
  * quote (`OWNER_NOTE`). A hand-off's note is the colleague's brief, a
  * hand-back's is the colleague's result, and a hub's pick-up joins the
@@ -186,13 +172,14 @@ export const NOTE_IS_OWNERS: Record<FollowUpKind, boolean> = {
   carry_out: true,
   rework: true,
   denied: true,
-  feedback: true,
   task_done: true,
   goal: true,
   first_day: true,
   hand_off: false,
   handed_back: false,
   resume: false,
+  // An answer's note joins the office's lines around each answer, as a pick-up's does.
+  answered: false,
   // An edit's words go as OWNER_EDIT, which makes only guesses.
   edited: false
 };
@@ -228,7 +215,8 @@ export async function lessonsOf(staffId: string): Promise<TaughtLesson[]> {
     .leftJoin(lessonUses, and(eq(lessonUses.lessonId, lessons.id), eq(lessonUses.staffId, staffId)))
     .where(followedBy(staffId))
     .orderBy(desc(lessons.createdAt));
-  return rows.map((l) => (dropped(l) ? { ...l, status: 'dropped' as const } : l));
+  const now = new Date();
+  return rows.map((l) => (dropped(l, now) ? { ...l, status: 'dropped' as const } : l));
 }
 
 /** A lesson in the Lessons window: how often it changed each Odd's work, and in all. */
@@ -245,7 +233,7 @@ export async function libraryLessons(): Promise<LibraryLesson[]> {
     db
       .select()
       .from(lessons)
-      .where(inArray(lessons.status, ['live', 'waiting']))
+      .where(inArray(lessons.status, OPEN_LESSON))
       .orderBy(desc(lessons.createdAt)),
     db.select().from(lessonUses)
   ]);
@@ -317,12 +305,14 @@ export async function lessonNewsSince(
 export function openGuessesFirst<T extends { status: LessonState; createdAt: Date }>(
   rows: T[]
 ): T[] {
+  const now = new Date();
   return (
     rows
       .filter(
         (l) =>
-          (l.status === 'live' || l.status === 'waiting') &&
-          !dropped({ status: l.status, createdAt: l.createdAt })
+          l.status !== 'dropped' &&
+          OPEN_LESSON.includes(l.status) &&
+          !dropped({ status: l.status, createdAt: l.createdAt }, now)
       )
       // Stable, so each group stays newest first.
       .sort((a, b) => Number(b.status === 'waiting') - Number(a.status === 'waiting'))
@@ -331,12 +321,13 @@ export function openGuessesFirst<T extends { status: LessonState; createdAt: Dat
 
 /** How many guesses wait for the owner's Keep on each Odd's Lessons tab: its own and every Odd's. */
 export async function guessesWaiting(staffIds: string[]): Promise<Record<string, number>> {
+  const now = new Date();
   const waiting = (
     await db
       .select({ staffId: lessons.staffId, status: lessons.status, createdAt: lessons.createdAt })
       .from(lessons)
       .where(eq(lessons.status, 'waiting'))
-  ).filter((l) => !dropped(l));
+  ).filter((l) => !dropped(l, now));
   return Object.fromEntries(
     staffIds.map((id) => [id, waiting.filter((l) => !l.staffId || l.staffId === id).length])
   );
@@ -347,26 +338,77 @@ export async function lesson(id: number): Promise<LessonRow | undefined> {
   return row;
 }
 
-const forWhom = async (l: Pick<LessonRow, 'staffId'>) =>
-  l.staffId ? ((await anyStaffer(l.staffId))?.name ?? l.staffId) : 'every Odd';
+/**
+ * Locks both scopes a lesson the Odd `heardBy` heard can sit in: its own and
+ * every Odd's. One lesson command can write both, as when Undo on a lesson
+ * for every Odd brings back the Odd's own lesson it replaced, so every lesson
+ * command takes both, sorted, and two commands take them in one order. These
+ * are locks per scope, outside LOCK_ORDER's table order: no lesson command
+ * takes a table row lock or nests inside another transition, so they cannot
+ * deadlock against one that does.
+ */
+async function lockScopes(tx: Tx, heardBy: string): Promise<void> {
+  for (const scope of [heardBy, 'everyone'].sort())
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`lessons:${scope}`}))`);
+}
 
-/** The ledger keeps the owner's words, and how many times they had to give them. */
-const recordTaught = async (l: LessonRow) =>
-  record({
-    kind: 'decision',
-    actor: 'owner',
-    title: `Taught ${await forWhom(l)}${l.missed ? `, told ${l.missed + 1} times now` : ''}: ${l.text}${onlyIn(l)}`,
-    reason: l.quote
+/**
+ * Runs one lesson command through `transition`: under the locks of the scopes
+ * of the Odd that heard the lesson, it loads their open lessons and the ones
+ * the command names (`named`), oldest first, decides, and writes. Returns the
+ * lesson the command answers with, or why it was refused.
+ */
+async function runLesson(
+  command: LessonCommand,
+  heardByOf: (tx: Tx) => Promise<string | undefined>,
+  named: SQL | undefined
+): Promise<LessonRow | { refused: string }> {
+  const written: { lesson?: LessonRow } = {};
+  const decided = await transition({
+    name: command.kind === 'keep' ? 'keepLesson' : 'changeLesson',
+    load: async (tx): Promise<LessonWork> => {
+      const heardBy = await heardByOf(tx);
+      if (!heardBy) return { lessons: [], heardByName: '' };
+      await lockScopes(tx, heardBy);
+      return {
+        lessons: await tx
+          .select()
+          .from(lessons)
+          .where(or(and(followedBy(heardBy), inArray(lessons.status, OPEN_LESSON)), named))
+          .orderBy(lessons.id),
+        heardByName: (await anyStaffer(heardBy, tx))?.name ?? heardBy
+      };
+    },
+    decide: (work, now) => decideLesson(work, command, now),
+    apply: async (tx, change) => {
+      written.lesson = await writeLesson(tx, change);
+    }
   });
+  if ('refused' in decided) return decided;
+  // apply sets it, and the shell runs apply whenever the decider did not refuse.
+  return written.lesson as LessonRow;
+}
 
-/** A lesson goes live: the one it replaces stops, and the ledger keeps the owner's words. */
-async function goLive(l: LessonRow): Promise<void> {
-  if (l.replaces)
-    await db
+/** Writes a decided lesson change, and returns the lesson it answers with. */
+async function writeLesson(tx: Tx, c: LessonChange): Promise<LessonRow> {
+  const l = c.lesson;
+  const [row] =
+    'insert' in l
+      ? await tx.insert(lessons).values(l.insert).returning()
+      : 'update' in l
+        ? await tx.update(lessons).set(l.set).where(eq(lessons.id, l.update)).returning()
+        : [l.same];
+  if (c.stops)
+    await tx
       .update(lessons)
       .set({ status: 'replaced' })
-      .where(and(eq(lessons.id, l.replaces), inArray(lessons.status, ['live', 'waiting'])));
-  await recordTaught(l);
+      .where(and(eq(lessons.id, c.stops), inArray(lessons.status, OPEN_LESSON)));
+  for (const id of c.bringsBack)
+    await tx
+      .update(lessons)
+      .set({ status: 'live' })
+      .where(and(eq(lessons.id, id), eq(lessons.status, 'replaced')));
+  return row;
 }
 
 /**
@@ -374,10 +416,7 @@ async function goLive(l: LessonRow): Promise<void> {
  * owner's words this run carried; otherwise it waits for the owner's Keep.
  * A run with none of their words keeps nothing: waiting lessons count toward
  * the cap, so guesses from an email or a page could crowd out the owner's own.
- * Only a `said` lesson changes one already there: a guess with the same words
- * and place returns that lesson as it is, replacing nothing and counting no
- * miss, and a new guess replaces its lesson only once the owner keeps it, so
- * nothing the Odd inferred changes what the owner already taught.
+ * Only a `said` lesson changes one already there (`decideLesson`).
  * Returns the lesson, or why it was not kept.
  */
 export async function keepLesson(
@@ -407,80 +446,26 @@ export async function keepLesson(
     return {
       problem: `Quote ${QUOTE_MIN_WORDS} or more words in a row from the file as it is now, or keep nothing.`
     };
-  const { how, staffId } = keptAs(heardBy, a);
-  const scoped = staffId ? eq(lessons.staffId, staffId) : isNull(lessons.staffId);
-  const open = and(scoped, inArray(lessons.status, ['live', 'waiting']));
   const problem = replacingProblem(a);
   if (problem) return { problem };
-  const missedIt = a.whyReplaced === 'missed';
-  let missed = 0;
-  if (a.replaces) {
-    const old = await lesson(a.replaces);
-    if (
-      !old ||
-      !['live', 'waiting'].includes(old.status) ||
-      dropped(old) ||
-      (old.staffId && old.staffId !== heardBy)
-    )
-      return { problem: `Lesson #${a.replaces} is not one of your current lessons.` };
-    // Replacing it would stop it for every other Odd too.
-    if (!old.staffId && staffId)
-      return {
-        problem: `Lesson #${a.replaces} is for every Odd, so a lesson only for you cannot replace it. Keep yours without replaces: the newer lesson wins for you.`
-      };
-    if (missedIt) missed = old.missed + 1;
-  }
-  const held = (await db.select().from(lessons).where(open)).filter((l) => !dropped(l));
-  const appliesTo = place(a.appliesTo);
-  const sameWords = held.filter((l) => plain(l.text) === plain(a.text));
-  const same = sameWords.find((l) => plain(l.appliesTo ?? '') === plain(appliesTo ?? ''));
-  if (same) {
-    if (how !== 'said') return same;
-    const replaces = a.replaces && a.replaces !== same.id ? a.replaces : same.replaces;
-    const nowSaid = same.status === 'waiting';
-    if (!missedIt && !nowSaid && replaces === same.replaces) return same;
-    const [row] = await db
-      .update(lessons)
-      .set({
-        replaces,
-        // The quote that was heard is what makes it `said`, so it replaces the guessed one.
-        ...(nowSaid ? { how, status: 'live' as const, quote: a.quote.trim() } : {}),
-        ...(missedIt ? { missed: sql`${lessons.missed} + 1` } : {})
-      })
-      .where(eq(lessons.id, same.id))
-      .returning();
-    // Said, so it is live now, whether it was before or waited as a guess.
-    await goLive(row);
-    return row;
-  }
-  // The same words for another place are another lesson, which replaces the
-  // open one with those words (a live one first) as it goes live: at once when
-  // said, on the owner's Keep when a guess. So narrowing or moving a lesson
-  // leaves one place, not both.
-  const moved = a.replaces
-    ? undefined
-    : (sameWords.find((l) => l.status === 'live') ?? sameWords[0]);
-  const replacing = a.replaces ?? moved?.id;
-  if (held.length >= LESSON_CAP && !replacing)
-    return {
-      problem: `${staffId ? 'You hold' : 'The office holds'} ${LESSON_CAP} lessons already. Pass replaces with the id of the one this covers, and why_replaced.`
-    };
-  const [row] = await db
-    .insert(lessons)
-    .values({
-      staffId,
+  const { how, staffId } = keptAs(heardBy, a);
+  const kept = await runLesson(
+    {
+      kind: 'keep',
       heardBy,
+      staffId,
+      how,
       text: a.text.trim(),
       quote: a.quote.trim(),
-      appliesTo,
-      how,
-      status: how === 'said' ? 'live' : 'waiting',
-      replaces: replacing ?? null,
-      missed
-    })
-    .returning();
-  if (row.status === 'live') await goLive(row);
-  return row;
+      appliesTo: place(a.appliesTo),
+      replaces: a.replaces,
+      whyReplaced: a.whyReplaced
+    },
+    async () => heardBy,
+    // The lesson it replaces may be for another Odd, which the decider refuses.
+    a.replaces ? eq(lessons.id, a.replaces) : undefined
+  );
+  return 'refused' in kept ? { problem: kept.refused } : kept;
 }
 
 /**
@@ -497,68 +482,26 @@ export async function changeLesson(
     status?: Extract<LessonStatus, 'live' | 'undone'>;
   }
 ): Promise<LessonRow | undefined> {
-  const was = await lesson(id);
-  if (!was) return undefined;
-  const text = patch.text?.trim();
-  const moved = patch.appliesTo !== undefined;
-  // A lesson for one Odd never replaces a lesson for every Odd, so narrowing
-  // one lets go of the office-wide lesson it replaced.
-  const old = patch.scope === 'me' && was.replaces ? await lesson(was.replaces) : undefined;
-  const letGo = old && !old.staffId ? old.id : undefined;
-  const [row] = await db
-    .update(lessons)
-    .set({
-      // The owner typed the new text, so it is their words now.
-      ...(text ? { text, quote: text, how: 'said' as const } : {}),
-      ...(moved ? { appliesTo: place(patch.appliesTo) } : {}),
-      ...(patch.scope ? { staffId: patch.scope === 'everyone' ? null : was.heardBy } : {}),
-      ...(letGo ? { replaces: null } : {}),
-      ...(patch.status ? { status: patch.status } : {})
-    })
-    .where(eq(lessons.id, id))
-    .returning();
-  if (patch.status === 'live' && was.status !== 'live') await goLive(row);
-  else if (patch.status === 'undone' && was.status === 'live')
-    await record({
-      kind: 'decision',
-      actor: 'owner',
-      title: `Took back a lesson for ${await forWhom(was)}: ${was.text}`
-    });
-  if (letGo) await bringBack(letGo, id);
-  if (patch.status === 'undone' && was.replaces) await bringBack(was.replaces, id);
-  else if (row.status === 'live' && (text || moved || patch.scope))
-    await record({
-      kind: 'decision',
-      actor: 'owner',
-      title: `Changed a lesson, now for ${await forWhom(row)}: ${row.text}${onlyIn(row)}`,
-      reason: was.text === row.text ? null : `Was: ${was.text}`
-    });
-  return row;
-}
-
-/**
- * A lesson that stops replacing another (Undo, or narrowed to one Odd) brings
- * back the one it replaced, while that one is still replaced and no other
- * open lesson replaces it.
- */
-async function bringBack(oldId: number, stoppedId: number): Promise<void> {
-  const others = (
-    await db
-      .select({ status: lessons.status, createdAt: lessons.createdAt })
-      .from(lessons)
-      .where(
-        and(
-          eq(lessons.replaces, oldId),
-          ne(lessons.id, stoppedId),
-          inArray(lessons.status, ['live', 'waiting'])
-        )
-      )
-  ).filter((l) => !dropped(l));
-  if (others.length) return;
-  await db
-    .update(lessons)
-    .set({ status: 'live' })
-    .where(and(eq(lessons.id, oldId), eq(lessons.status, 'replaced')));
+  const changed = await runLesson(
+    {
+      kind: 'change',
+      id,
+      text: patch.text?.trim() || undefined,
+      appliesTo: patch.appliesTo === undefined ? undefined : place(patch.appliesTo),
+      scope: patch.scope,
+      status: patch.status
+    },
+    // Who heard a lesson never changes, so it is safe to read before the locks.
+    async (tx) =>
+      (await tx.select({ heardBy: lessons.heardBy }).from(lessons).where(eq(lessons.id, id)))[0]
+        ?.heardBy,
+    // The lesson and the one it replaces, which is no longer open.
+    or(
+      eq(lessons.id, id),
+      eq(lessons.id, sql`(select ${lessons.replaces} from ${lessons} where ${lessons.id} = ${id})`)
+    )
+  );
+  return 'refused' in changed ? undefined : changed;
 }
 
 /** An Odd says a live lesson it follows changed its work. Returns it with that Odd's count. */
@@ -588,7 +531,8 @@ export async function usedLesson(id: number, staffId: string): Promise<TaughtLes
  * starts, and once one under way ends, the office calls this again with the
  * version it read, so a save made meanwhile starts one more. A file on a task
  * is a form the owner filled in, not a correction, and an unchanged file says
- * nothing. Returns whether it started one.
+ * nothing, and neither does a save to a file of an Odd that left. Returns
+ * whether it started one.
  */
 export async function learnFromEdit(
   staffId: string,
@@ -619,6 +563,10 @@ export async function learnFromEdit(
       )
     );
   if (unfinished) return false;
-  await addFollowUp(db, { staffId, kind: 'edited', edit, note: null });
-  return true;
+  // The decider owes an Odd that left nothing, and puts no row then.
+  const went = await transitionWork({
+    kind: 'runQueued',
+    run: { staffId, kind: 'edited', edit, note: null }
+  });
+  return 'change' in went && went.change.put.length > 0;
 }

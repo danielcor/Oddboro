@@ -324,7 +324,7 @@ test('every other door answer fails the chat with the report under a note and no
     [
       'interrupted',
       () => void (fake.door = body('interrupted', { partialReply: 'Ship' })),
-      'Pat could not answer just now.'
+      'Pat could not finish this answer.'
     ],
     ['503', () => void fake.refused.set('/pat/stream', 503), 'Pat could not answer just now.'],
     [
@@ -351,6 +351,9 @@ test('every other door answer fails the chat with the report under a note and no
     // The persona's door failed, not the hands' sign-in, so the page shows no sign-in card.
     assert.deepEqual(events.at(-1), { type: 'error', message: reply }, name);
     assert.ok(reply.split('\n')[0].includes(line), `${name}: ${reply.slice(0, 120)}`);
+    if (name === 'interrupted') {
+      assert.ok(reply.includes("\n\nShip\n\nHere is what Pat's hands found."), reply);
+    }
     assert.ok(reply.includes("Here is what Pat's hands found.\n\n" + REPORT_START), name);
     assert.equal((await L.personaOdd('pat'))?.package?.quiet, undefined, name);
   }

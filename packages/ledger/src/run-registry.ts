@@ -30,6 +30,12 @@ export type Work = {
    */
   toStart?: true;
   askId?: number;
+  /**
+   * The hand-off this run serves (`servesHandOff`): its own row's id, or the
+   * one whose ask or task the owner answered. Whoever handed the work over
+   * reads the colleague as on it while such a run goes, a carry-out included.
+   */
+  handOffId?: number;
   about?: WorkAbout;
   /** The tool the staffer is using now, as Claude Code names it. */
   doing?: string;

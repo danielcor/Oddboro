@@ -35,7 +35,13 @@ await L.setOwnerName('Ada');
 
 after(() => fake.close());
 
-type Event = { type: string; slug?: string; joined?: string; problem?: string; working?: object };
+type Event = {
+  type: string;
+  slug?: string;
+  joined?: string;
+  problem?: string;
+  inProgress?: object;
+};
 const heard: Event[] = [];
 bus.on('event', (e: Event) => heard.push(e));
 
@@ -206,7 +212,7 @@ test('a package from New Altitude installs as an Odd with its look, parts and he
     [{ type: 'persona', slug: 'pat', joined: 'installed' }]
   );
   // No coding tool ran for it, to draw a look or anything else, and its door was not asked.
-  assert.ok(!heard.slice(told).some((e) => e.type === 'working' && row.id in e.working!));
+  assert.ok(!heard.slice(told).some((e) => e.type === 'working' && row.id in e.inProgress!));
   assert.deepEqual([...L.runsGoing.keys()], []);
   assert.equal(doorRequests().length, 0);
 });

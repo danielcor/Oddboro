@@ -37,9 +37,7 @@ Object.assign(process.env, {
   ODDBORO_HOME: folder,
   ODDBORO_DB_PORT: String(port),
   ODDBORO_ENV: join(folder, 'none.env'),
-  DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,
-  ODDBORO_LOCAL_DB: '1',
-  OLLAMA_URL: 'http://127.0.0.1:9'
+  ODDBORO_LOCAL_DB: '1'
 });
 
 /** GitHub's own scopes list, as its MCP server gives it (fetched 2026-11-09). */

@@ -1,11 +1,13 @@
 // The policy a Gemini run gets (gemini.ts), proved against Gemini's own
 // policy engine: the installed Gemini CLI's loader reads the office's file,
 // drops no rule, and its engine decides a table of calls the way the office
-// means. `npm test -w @oddboro/office` runs it against the `gemini` the office
-// would run, the first on PATH. With none there (as in CI) the engine test is
-// reported skipped and only the check Gemini's loader runs on each rule's
-// pattern, mirrored below, runs. A `gemini` whose engine this cannot find
-// fails, so an installed Gemini never skips.
+// means. It checks the `gemini` the office would run, the first on PATH. The
+// test script's PATH holds no AI tool (test-defaults.ts), so there, as in CI,
+// the engine test is reported skipped and only the check Gemini's loader runs
+// on each rule's pattern, mirrored below, runs. To check an installed Gemini,
+// run this file on its own from apps/office:
+// `node --test src/lib/server/gemini-policy.test.ts`. A `gemini` whose engine
+// this cannot find fails, so an installed Gemini never skips.
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -228,7 +230,7 @@ async function misjudged(
 
 const SKIP =
   !bin &&
-  "SKIPPED: no gemini on PATH, so Gemini's own engine did not check the policy; put the Gemini CLI's folder first on PATH to run it";
+  "SKIPPED: no gemini on PATH, so Gemini's own engine did not check the policy; run this file on its own with the Gemini CLI on PATH to run it";
 
 test(
   "Gemini's own loader reads a run's policy whole and its engine decides each call as the office means",

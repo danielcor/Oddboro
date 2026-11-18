@@ -13,7 +13,8 @@
     "./dist/*": "./dist/*",
     "./look": "./src/look.ts",
     "./mark": "./src/mark.ts",
-    "./art": "./src/art.ts"
+    "./art": "./src/art.ts",
+    "./palette.json": "./src/palette.json"
   },
   "scripts": {
     "build": "node scripts/compile.ts && node scripts/looks-sheet.ts",

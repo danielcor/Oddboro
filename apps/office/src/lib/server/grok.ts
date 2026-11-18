@@ -27,7 +27,6 @@
 // outlast it (`grokSignedOut`). Where the Mac's Docker socket is a link, the
 // run gets a home of its own so Grok's sandbox can start (`runHome`).
 // Windows has no Grok sandbox, so there the office's tools are the wall.
-import { execFile, spawn } from 'node:child_process';
 import {
   accessSync,
   chmodSync,
@@ -53,8 +52,11 @@ import {
   runsGoing,
   toolHome,
   currentPlatform,
+  probe,
   type Effort
 } from '@oddboro/ledger';
+import type { Launch } from './cli.ts';
+import { claudeReader } from './claude.ts';
 import { andBelow, denyRules, instructionPaths } from './files.ts';
 import { mcpGrant, NOT_SIGNED_IN, replace, sweep, vendorEnv, type RunImage } from './launch.ts';
 import { runEnv } from './run-env-allow.ts';
@@ -260,7 +262,8 @@ function promptFile(h: GrokHome, key: string, message: string, images: RunImage[
 }
 const PROMPT_ENDS = ['.prompt.txt', '.prompt.json'] as const;
 
-type GrokLaunch = { args: string[]; env: NodeJS.ProcessEnv; done: () => void };
+/** Grok reads its message from its prompt file, so its launch has no input (`LAUNCHES.grok` in cli.ts). */
+type GrokLaunch = Omit<Launch, 'stdin'>;
 
 /** A sandbox profile, kept in the Grok home's sandbox.toml. */
 type Profile = { readOnly: string[]; readWrite: string[]; deny: string[] };
@@ -472,7 +475,9 @@ export function grokLaunch(r: GrokRun): GrokLaunch {
     done: () => {
       rmSync(agent, { force: true });
       rmSync(prompt, { force: true });
-    }
+    },
+    // Grok streams in Claude Code's shape, naming its own tools.
+    read: claudeReader('grok')
   };
 }
 
@@ -481,24 +486,35 @@ export function grokLaunch(r: GrokRun): GrokLaunch {
  * --json`) on the office's home and leader socket, or nothing when it cannot
  * say.
  */
-export function grokLatest(): Promise<string | undefined> {
+export async function grokLatest(): Promise<string | undefined> {
   const h = grokHome();
   grokHomeReady(h);
-  return new Promise((done) =>
-    execFile(
-      grokCommand() ?? 'grok',
-      ['update', '--check', '--json', '--leader-socket', h.leader],
-      { cwd: h.dir, env: grokEnv(h), timeout: 15_000, windowsHide: true },
-      (_e, out) => {
-        try {
-          const v = (JSON.parse(String(out)) as { latestVersion?: unknown }).latestVersion;
-          done(typeof v === 'string' && v ? v : undefined);
-        } catch {
-          done(undefined);
-        }
-      }
-    )
+  const r = await probe(
+    grokCommand() ?? 'grok',
+    ['update', '--check', '--json', '--leader-socket', h.leader],
+    { cwd: h.dir, env: grokEnv(h), timeout: 15_000 }
   );
+  let out: string;
+  switch (r.status) {
+    // Grok may exit with an error and still print its answer.
+    case 'ok':
+    case 'failed':
+      out = r.out;
+      break;
+    case 'missing':
+    case 'timeout':
+      return undefined;
+    default: {
+      const missed: never = r;
+      throw new Error(`Grok's update check came back as ${JSON.stringify(missed)}`);
+    }
+  }
+  try {
+    const v = (JSON.parse(out) as { latestVersion?: unknown }).latestVersion;
+    return typeof v === 'string' && v ? v : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -638,23 +654,16 @@ const renewing = new Map<string, Promise<void>>();
 function renew(h: GrokHome): Promise<void> {
   const going = renewing.get(h.dir);
   if (going) return going;
-  const next = new Promise<void>((done) => {
-    // Outside the sandbox, so on the home's own leader socket, never the owner's.
-    const child = spawn(grokCommand() ?? 'grok', ['models', '--leader-socket', h.leader], {
-      cwd: h.dir,
-      env: grokEnv(h),
-      stdio: 'ignore'
-    });
-    // Its own timer rather than spawn's `timeout`, which a test's mock timers
-    // cannot reach, so the test need not wait the 30 seconds out.
-    const limit = setTimeout(() => child.kill('SIGKILL'), RENEW_MS);
-    const end = () => {
-      clearTimeout(limit);
-      done();
-    };
-    child.on('error', end);
-    child.on('close', end);
-  }).finally(() => renewing.delete(h.dir));
+  // Outside the sandbox, so on the home's own leader socket, never the owner's.
+  // How it ended does not matter: the caller reads `expires_at` either way.
+  const next = probe(grokCommand() ?? 'grok', ['models', '--leader-socket', h.leader], {
+    cwd: h.dir,
+    env: grokEnv(h),
+    timeout: RENEW_MS,
+    killSignal: 'SIGKILL'
+  })
+    .then(() => {})
+    .finally(() => renewing.delete(h.dir));
   renewing.set(h.dir, next);
   return next;
 }

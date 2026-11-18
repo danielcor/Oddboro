@@ -6,31 +6,34 @@
   import type { Floor } from '#lib/floor/engine.ts';
   import type { StaffActor, Pop } from '#lib/floor/staff.ts';
   import type { Beat } from '#lib/floor/reveal.ts';
-  import Onboarding, { type Stage } from '#lib/ui/onboarding/Onboarding.svelte';
+  import type { Stage } from '#lib/ui/onboarding/Onboarding.svelte';
+  import WeatherPill from '#lib/ui/WeatherPill.svelte';
+  import { askWeather, weather } from '#lib/ui/weather.svelte.ts';
   import FloorControls, { type Light } from '#lib/ui/FloorControls.svelte';
   import { music, musicEnded, startMusic } from '#lib/ui/music.svelte.ts';
   import { chatAbout } from '#lib/ui/chat-about.svelte.ts';
-  import { ACTIVITY_LABEL, type Activity, type StaffProfile } from '#lib/staff/roster.ts';
-  import { threadTag, type HeldThread } from '#lib/staff/thread-tags.ts';
-  import StaffCard from '#lib/ui/StaffCard.svelte';
+  import type { Activity, StaffProfile } from '#lib/staff/roster.ts';
+  import type { HeldThread } from '#lib/staff/thread-tags.ts';
+  import {
+    floorMode,
+    nowIn,
+    oddNow,
+    railRing,
+    readerProps,
+    runsChanged,
+    tagWords,
+    type Snapshot
+  } from '#lib/staff/odd-now.ts';
   import { chatRequest, type Delivered } from '#lib/ui/chat-about.svelte.ts';
   import OddsRail, { ODDS_RAIL, ODDS_RAIL_OPEN } from '#lib/ui/OddsRail.svelte';
   import type { Work } from '#lib/staff/work.ts';
   import type { LessonEvent, OfficeEvent } from '#lib/server/events.ts';
-  import DeskDrawer from '#lib/ui/DeskDrawer.svelte';
   import { account } from '#lib/ui/account.svelte.ts';
   import { personaNews } from '#lib/ui/persona-offers.svelte.ts';
   import { diagnostics } from '#lib/ui/diagnostics.svelte.ts';
-  import LedgerPanel from '#lib/ui/LedgerPanel.svelte';
-  import ServicesPanel from '#lib/ui/ServicesPanel.svelte';
   import { serviceNames } from '#lib/ui/service-names.svelte.ts';
-  import GoalsPanel from '#lib/ui/GoalsPanel.svelte';
-  import LessonsLibrary from '#lib/ui/LessonsLibrary.svelte';
-  import Welcome from '#lib/ui/Welcome.svelte';
-  import ProjectSessions from '#lib/ui/ProjectSessions.svelte';
-  import HireDrawer from '#lib/ui/HireDrawer.svelte';
-  import FileViewer from '#lib/ui/FileViewer.svelte';
-  import ReportView from '#lib/ui/ReportView.svelte';
+  import RestoredNote from '#lib/ui/RestoredNote.svelte';
+  import { actCheck } from '#lib/ui/act-check.svelte.ts';
   import {
     advanced,
     close,
@@ -51,6 +54,13 @@
   import { call, type ApiUrl } from '#lib/ui/api.ts';
   import { setZone, zone, zoneName, zoneShort } from '@oddboro/ledger/time';
   import { LIVE_TABLES, type LiveTable } from '@oddboro/ledger/live-tables';
+
+  // Panels and dialogs that open on a click load when they open, so the first
+  // page carries only what shows at start. These three load early as well: the
+  // first run's guide beside the floor, and the card and the Desk once it draws.
+  const loadOnboarding = () => import('#lib/ui/onboarding/Onboarding.svelte');
+  const loadStaffCard = () => import('#lib/ui/StaffCard.svelte');
+  const loadDeskDrawer = () => import('#lib/ui/DeskDrawer.svelte');
 
   let { data } = $props();
   // Every time on the page is in the office's zone, which only the server knows.
@@ -87,6 +97,9 @@
   let atlasCatalog: Record<string, unknown> = {};
   let actors: StaffActor[] = [];
   let tags = $state<Tag[]>([]);
+  /** Where the floor put each Odd, kept only when one changes activity, so a frame alone changes no Odd's state. */
+  let placed = $state<Record<string, Activity>>({});
+  let placedKey = '';
   let labels = $state<Label[]>([]);
   /** Who holds each spot, by spot id, so the Send tab can show a place as taken. */
   let held = $state<Record<string, { id: string; name: string }>>({});
@@ -127,6 +140,10 @@
   $effect.pre(() => {
     advanced.on = data.advanced;
   });
+  // Whether the owner passed the Act check; passing it on this page sets it from then on.
+  $effect.pre(() => {
+    if (data.actChecked) actCheck.passed = true;
+  });
   // Off, nothing offers Projects, and an open Projects window closes.
   $effect(() => {
     if (!advanced.on) for (const w of wins.list) if (w.kind === 'projects') close(w.id, true);
@@ -160,20 +177,12 @@
    */
   let watching: (() => [number, number] | undefined) | undefined;
   const openSetup = () => open({ id: 'setup', kind: 'setup' });
-  let working = $state<Record<string, string>>({});
   /** Each staffer's runs going, or waiting for a slot: every `working` event brings them. */
   let inProgress = $state<Record<string, Work[]>>({});
+  /** The Odds replying to the owner in chat: every `working` event brings them. */
+  let chatting = $state<string[]>([]);
   /** Each staffer's follow-ups yet to start, read with the office. */
   let toStart = $state<Record<string, Work[]>>({});
-  /** Each staffer's work in progress: its runs, then what waits to start. */
-  const work = $derived(
-    Object.fromEntries(
-      [...new Set([...Object.keys(inProgress), ...Object.keys(toStart)])].map((id) => [
-        id,
-        [...(inProgress[id] ?? []), ...(toStart[id] ?? [])]
-      ])
-    )
-  );
   /** A request for the card to open on a tab, from the Odds rail's list. */
   let cardShow = $state<{ id: string; tab: 'work'; n: number } | undefined>();
   /** Bumps when jobs, runs, access, goals, threads or lessons change, so the card's tabs and the Goals and Lessons windows reload. */
@@ -261,6 +270,10 @@
   });
   // The first run shows the lot, then the office as it goes up on it.
   let liveWorld = $state<World | undefined>();
+  /** The weather outside, as MET Norway's symbol, unless the viewer holds the floor at day or night. */
+  const sky = $derived(
+    light === 'auto' && weather.setting && weather.report ? weather.report.symbol : undefined
+  );
   /** The hour the floor shows: the office's own, unless the viewer holds it at day or night. */
   const shownHour = $derived(light === 'day' ? 13 : light === 'night' ? 22 : hour);
   const office = $derived(liveWorld ? { ...data.office, world: liveWorld } : data.office);
@@ -314,36 +327,28 @@
   const clock = $derived(
     now.toLocaleTimeString('en-US', { ...PT, hour: 'numeric', minute: '2-digit' })
   );
-  // A staffer with an ask, a task or an unread message for the owner comes to their door.
-  const waiting = $derived(
-    new Set([
-      ...desk.asks.map((a) => a.staffId),
-      ...desk.tasks.map((t) => t.staffId),
-      ...Object.keys(messages)
-    ])
-  );
-  /** Each staffer's thread a colleague holds, or holds for its lead, in words. */
-  const threadTags = $derived(
-    Object.fromEntries(
-      staff.map((p) => [
-        p.id,
-        threadTag({
-          id: p.id,
-          threads,
-          working: !!working[p.id],
-          nameOf: (id) => staff.find((s) => s.id === id)?.name ?? id
-        })
-      ])
-    )
-  );
-  /** What a staffer is doing, in words: where it is headed, or what it is at. */
-  function statusOf(t: Tag): string {
-    if (t.heading) return `→ ${t.heading}`;
-    if (messages[t.id]) return 'Has a message for you';
-    if (waiting.has(t.id)) return 'Waiting on you';
-    return threadTags[t.id]?.text ?? working[t.id] ?? ACTIVITY_LABEL[t.activity];
-  }
-  const status = $derived(Object.fromEntries(tags.map((t) => [t.id, statusOf(t)])));
+  /** The office as the page holds it, which every screen's words for an Odd come from. */
+  const snapshot = $derived.by((): Snapshot => {
+    // An Odd the floor still shows after it left keeps its tag until the floor drops it.
+    const ids = [...new Set([...staff.map((p) => p.id), ...Object.keys(placed)])];
+    return {
+      ids,
+      inProgress,
+      toStart,
+      chatting,
+      desk,
+      staff,
+      messages,
+      threads,
+      // An Odd not on the floor yet reads as at home, as the card always read it.
+      activity: Object.fromEntries(ids.map((id) => [id, placed[id] ?? 'home'])),
+      nameOf: (id) => staff.find((s) => s.id === id)?.name ?? id
+    };
+  });
+  /** Every Odd's state, derived once, so the floor, the rail, the card and the chat agree. */
+  const oddsNow = $derived(oddNow(snapshot));
+  /** Each Odd on the floor, to the room it walks to, if any. */
+  const headings = $derived(Object.fromEntries(tags.map((t) => [t.id, t.heading])));
 
   // The While you were away card counts once, however many jobs it lists.
   const deskCount = $derived(
@@ -421,16 +426,13 @@
   }
 
   /**
-   * The mode the office puts a staffer in: outside the owner's door, at its
-   * job, or free. A lead waiting on a colleague stays at its job, so the end
-   * of its run moves nobody.
+   * The mode the office puts each staffer in: outside the owner's door, at
+   * its job, or free. The ticker reads it each frame, so it is worked out
+   * only when an Odd's state changes.
    */
-  const wantOf = (p: StaffProfile): Activity | undefined =>
-    waiting.has(p.id)
-      ? 'wait'
-      : working[p.id] || threadTags[p.id]?.waitsOn
-        ? jobActivity(p)
-        : undefined;
+  const floorModes = $derived(
+    Object.fromEntries(staff.map((p) => [p.id, floorMode(oddsNow[p.id], jobActivity(p))]))
+  );
 
   const taken = (except?: StaffActor) => {
     const off = new Set(switchedOff);
@@ -510,7 +512,7 @@
       else {
         // The office is opening: everyone is already somewhere, each in a
         // different spot, instead of all walking in from the lobby at once.
-        const want = wantOf(p);
+        const want = floorModes[p.id];
         forced[p.id] = want;
         const free = new Set(w.spots.map((s) => s.activity));
         if (!a.assign(want ?? pickActivity(free, 'home'), w.spots, taken(a)))
@@ -575,7 +577,7 @@
       const next = await call<{
         staff: StaffProfile[];
         desk: Desk;
-        working: Record<string, string>;
+        chatting: string[];
         inProgress: Record<string, Work[]>;
         toStart: Record<string, Work[]>;
         roomNames: Record<string, string>;
@@ -601,7 +603,7 @@
       seen = keys(next.desk);
       staff = next.staff;
       desk = next.desk;
-      working = next.working;
+      chatting = next.chatting;
       inProgress = next.inProgress;
       toStart = next.toStart;
       roomNames = next.roomNames;
@@ -720,7 +722,14 @@
     } catch {
       // No storage: notifications stay off.
     }
-    const timer = setInterval(() => (now = new Date()), 15_000);
+    // The page's one clock. The weather rides on it: asked only when due and only while seen.
+    void askWeather();
+    const timer = setInterval(() => {
+      now = new Date();
+      void askWeather();
+    }, 15_000);
+    const catchUp = () => void askWeather();
+    document.addEventListener('visibilitychange', catchUp);
 
     // One live line from the server. Changes arrive as they happen.
     const events = new EventSource('/api/events' satisfies ApiUrl);
@@ -730,13 +739,14 @@
         account.status = e.status;
         return;
       }
+      if (e.type === 'weather') return void askWeather(true);
       if (e.type === 'working') {
         // Every tool call a staffer makes updates its work in progress; only
-        // work starting or ending reloads the card's tabs.
-        const started = JSON.stringify(e.working) !== JSON.stringify(working);
-        working = e.working;
+        // a run starting or ending reloads the card's tabs.
+        const before = oddsNow;
         inProgress = e.inProgress;
-        if (started) version++;
+        chatting = e.chatting;
+        if (runsChanged(before, oddsNow)) version++;
         return;
       }
       // Whoever handed work on, or did it, walks over to the other and back.
@@ -762,6 +772,8 @@
       if (page.includes('ledger')) ledgerVersion++;
     };
 
+    // The first run's guide shows as soon as the floor does, so fetch both at once.
+    if (firstRun) loadOnboarding().catch(() => {});
     (async () => {
       try {
         F = await import('#lib/floor/index.ts');
@@ -771,6 +783,7 @@
         atlasCatalog = atlas.catalog;
         floor = await F.Floor.create(host, office.world, atlas);
         floor.setHour(shownHour);
+        floor.setWeather(sky);
         // Dev only: lets a browser console poke at the floor.
         if (import.meta.env.DEV) (window as unknown as { floor: Floor }).floor = floor;
         start = arrival(office.world);
@@ -804,6 +817,11 @@
                 ...p
               };
             });
+          const at = tags.map((t) => `${t.id}=${t.activity}`).join('|');
+          if (at !== placedKey) {
+            placedKey = at;
+            placed = Object.fromEntries(tags.map((t) => [t.id, t.activity]));
+          }
           // A sign scales with the floor, so it sits on the same spot of the wall at
           // the same size against the room at every zoom, and never runs past the room.
           const scale = floor!.scale / SIGN_ZOOM;
@@ -837,7 +855,7 @@
           for (const a of actors) {
             const id = a.profile.id;
             if (manual[id] || a.onTrip) continue;
-            const want = wantOf(a.profile);
+            const want = floorModes[id];
             if (want !== forced[id]) {
               forced[id] = want;
               a.assign(want ?? 'work', w.spots, taken(a));
@@ -872,6 +890,13 @@
         });
         ready = true;
         floorReady = true;
+        // The card and the Desk are the panels opened most. Fetch them once,
+        // after the floor is up, so they open at once. A failed fetch here
+        // stays quiet: it is only a head start.
+        setTimeout(() => {
+          loadStaffCard().catch(() => {});
+          loadDeskDrawer().catch(() => {});
+        }, 0);
       } catch (e) {
         failed = e instanceof Error ? e.message : String(e);
       }
@@ -880,6 +905,7 @@
     return () => {
       disposed = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', catchUp);
       events.close();
       for (const a of actors) a.destroy();
       floor?.destroy();
@@ -1088,6 +1114,11 @@
   });
 
   $effect(() => {
+    const s = sky;
+    if (floorReady) floor?.setWeather(s);
+  });
+
+  $effect(() => {
     const l = light;
     try {
       localStorage.setItem('oddboro.light', l);
@@ -1162,8 +1193,8 @@
       </div>
     {/each}
     {#each tags as t (t.id)}
-      {@const isWaiting = waiting.has(t.id)}
-      {@const words = statusOf(t)}
+      {@const isWaiting = railRing(oddsNow[t.id])}
+      {@const words = tagWords(oddsNow[t.id], t.heading)}
       <button
         class="tag pointer-events-auto absolute flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] whitespace-nowrap"
         class:active={selected === t.id}
@@ -1201,6 +1232,9 @@
             >Setup</button
           >
         </div>
+        {#if data.restored && !firstRun}
+          <RestoredNote restored={data.restored} />
+        {/if}
       </div>
       {#if open && !firstRun}
         <button
@@ -1246,7 +1280,9 @@
     bind:this={music.audio}
     preload="auto"
     onplay={() => (music.playing = true)}
-    onpause={() => (music.playing = false)}
+    onpause={() => {
+      if (!music.focus) music.playing = false;
+    }}
     ontimeupdate={(e) => (music.time = e.currentTarget.currentTime)}
     ondurationchange={(e) => (music.duration = e.currentTarget.duration || 0)}
     onended={musicEnded}
@@ -1267,7 +1303,9 @@
       <div class="flex h-full min-h-0 flex-col">
         {@render plate(true)}
         {#if floorReady}
-          <Onboarding {stage} sample={data.sample} />
+          {#await loadOnboarding() then { default: Onboarding }}
+            <Onboarding {stage} sample={data.sample} />
+          {/await}
         {/if}
         <div class="mt-auto border-t border-hairline px-3 py-2">
           <FloorControls bind:light onfit={fitFloor} onzoom={(d) => floor?.zoomBy(d)} />
@@ -1324,39 +1362,54 @@
         <div class="min-h-0 flex-1 border-t border-hairline">
           {#each wins.list as w (w.id)}
             <div class="h-full min-h-0" class:hidden={wins.active !== w.id} role="tabpanel">
+              <!-- Each window's code loads when it first opens. -->
               {#if w.kind === 'desk'}
-                <DeskDrawer
-                  {desk}
-                  {staff}
-                  focus={deskFocus}
-                  onhire={hireProposal}
-                  onplan={planHires}
-                  onstaff={select}
-                />
+                {#await loadDeskDrawer() then { default: DeskDrawer }}
+                  <DeskDrawer
+                    {desk}
+                    {staff}
+                    focus={deskFocus}
+                    onhire={hireProposal}
+                    onplan={planHires}
+                    onstaff={select}
+                  />
+                {/await}
               {:else if w.kind === 'goals'}
-                <GoalsPanel {staff} {version} onthread={openThread} />
+                {#await import('#lib/ui/GoalsPanel.svelte') then { default: GoalsPanel }}
+                  <GoalsPanel {staff} {version} onthread={openThread} />
+                {/await}
               {:else if w.kind === 'lessons'}
-                <LessonsLibrary {staff} {version} bind:filter={w.filter} />
+                {#await import('#lib/ui/LessonsLibrary.svelte') then { default: LessonsLibrary }}
+                  <LessonsLibrary {staff} {version} bind:filter={w.filter} />
+                {/await}
               {:else if w.kind === 'ledger'}
-                <LedgerPanel {staff} version={ledgerVersion} />
+                {#await import('#lib/ui/LedgerPanel.svelte') then { default: LedgerPanel }}
+                  <LedgerPanel {staff} version={ledgerVersion} />
+                {/await}
               {:else if w.kind === 'projects'}
-                <ProjectSessions {staff} {version} ask={w.ask} />
+                {#await import('#lib/ui/ProjectSessions.svelte') then { default: ProjectSessions }}
+                  <ProjectSessions {staff} {version} ask={w.ask} />
+                {/await}
               {:else if w.kind === 'services'}
-                <ServicesPanel {staff} {version} onstaff={select} />
+                {#await import('#lib/ui/ServicesPanel.svelte') then { default: ServicesPanel }}
+                  <ServicesPanel {staff} {version} onstaff={select} />
+                {/await}
               {:else if w.kind === 'setup'}
-                <Welcome
-                  office={office.name}
-                  {welcomed}
-                  ondesign={() => open({ id: 'office', kind: 'office' })}
-                  onhire={() => openHire()}
-                  onmeet={(id) => select(id)}
-                  ondone={() => {
-                    welcomed = true;
-                    close(w.id, true);
-                  }}
-                  {notify}
-                  onnotify={setNotify}
-                />
+                {#await import('#lib/ui/Welcome.svelte') then { default: Welcome }}
+                  <Welcome
+                    office={office.name}
+                    {welcomed}
+                    ondesign={() => open({ id: 'office', kind: 'office' })}
+                    onhire={() => openHire()}
+                    onmeet={(id) => select(id)}
+                    ondone={() => {
+                      welcomed = true;
+                      close(w.id, true);
+                    }}
+                    {notify}
+                    onnotify={setNotify}
+                  />
+                {/await}
               {:else if w.kind === 'office'}
                 <!-- Loaded when opened: it draws with PixiJS, which the first page leaves out. -->
                 {#await import('#lib/ui/OfficeDesigner.svelte') then { default: OfficeDesigner }}
@@ -1368,28 +1421,34 @@
                   />
                 {/await}
               {:else if w.kind === 'hire'}
-                <HireDrawer
-                  id={w.id}
-                  rooms={hireRooms}
-                  from={w.from}
-                  onhired={(p) => {
-                    close(w.id, true);
-                    refresh();
-                    select(p.id);
-                  }}
-                  ondone={() => {
-                    close(w.id, true);
-                    refresh();
-                  }}
-                />
+                {#await import('#lib/ui/HireDrawer.svelte') then { default: HireDrawer }}
+                  <HireDrawer
+                    id={w.id}
+                    rooms={hireRooms}
+                    from={w.from}
+                    onhired={(p) => {
+                      close(w.id, true);
+                      refresh();
+                      select(p.id);
+                    }}
+                    ondone={() => {
+                      close(w.id, true);
+                      refresh();
+                    }}
+                  />
+                {/await}
               {:else if w.kind === 'report'}
-                <ReportView report={w.report} {staff} />
+                {#await import('#lib/ui/ReportView.svelte') then { default: ReportView }}
+                  <ReportView report={w.report} {staff} />
+                {/await}
               {:else}
-                <FileViewer
-                  id={w.id}
-                  file={w.file}
-                  nameOf={(id) => staff.find((p) => p.id === id)?.name ?? id}
-                />
+                {#await import('#lib/ui/FileViewer.svelte') then { default: FileViewer }}
+                  <FileViewer
+                    id={w.id}
+                    file={w.file}
+                    nameOf={(id) => staff.find((p) => p.id === id)?.name ?? id}
+                  />
+                {/await}
               {/if}
             </div>
           {/each}
@@ -1413,29 +1472,36 @@
     </header>
   {/if}
 
-  <!-- The desk pill, centred on the floor between the two panels. Projects
-       covers the floor, and the plate's Desk button carries the count. -->
+  <!-- The desk pill, centred on the floor between the two panels, and the
+       weather at its end once the owner turns weather on. Projects covers the
+       floor, and the plate's Desk button carries the count. -->
   <div
     class="pointer-events-none absolute top-4 flex justify-center max-sm:top-24"
     class:hidden={firstRun || projectsReach !== undefined}
     style="inset-inline: {leftSpace}px {rightSpace}px"
   >
-    <button
-      class="glass pointer-events-auto flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm"
-      class:desk-due={deskCount > 0}
-      onclick={() => toggle('desk')}
-      aria-keyshortcuts="D"
-    >
-      {#if deskCount}
-        <span
-          class="flex size-5 items-center justify-center rounded-full bg-ember font-pixel text-xs text-night"
-          >{deskCount}</span
-        >
-        <span class="text-ink">waiting on you</span>
-      {:else}
-        <span class="text-muted">Desk clear</span>
-      {/if}
-    </button>
+    <!-- The weather hangs off the desk pill's end, so the desk pill keeps its centre. -->
+    <div class="relative">
+      <button
+        class="glass pointer-events-auto flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm"
+        class:desk-due={deskCount > 0}
+        onclick={() => toggle('desk')}
+        aria-keyshortcuts="D"
+      >
+        {#if deskCount}
+          <span
+            class="flex size-5 items-center justify-center rounded-full bg-ember font-pixel text-xs text-night"
+            >{deskCount}</span
+          >
+          <span class="text-ink">waiting on you</span>
+        {:else}
+          <span class="text-muted">Desk clear</span>
+        {/if}
+      </button>
+      <div class="absolute start-full top-0 ms-2">
+        <WeatherPill onsetup={openSetup} />
+      </div>
+    </div>
   </div>
 
   <!-- The end side: every Odd on the rail, and the picked one's panel beside it.
@@ -1445,9 +1511,8 @@
     <div class="pointer-events-none absolute inset-0 z-20" transition:fly={fromEdge(80)}>
       <OddsRail
         {staff}
-        {status}
-        {waiting}
-        inProgress={work}
+        nowOf={nowIn(oddsNow)}
+        {headings}
         selected={profile && !rightCollapsed ? selected : undefined}
         find={findAgent}
         searching={railAsked}
@@ -1470,28 +1535,26 @@
     >
       {#key profile.id}
         <div class="h-full" in:fly={fromEdge()}>
-          <StaffCard
-            {desk}
-            {staff}
-            onplan={planHires}
-            {profile}
-            activity={selectedActivity}
-            {version}
-            working={working[profile.id]}
-            work={work[profile.id] ?? []}
-            show={cardShow?.id === profile.id ? cardShow : undefined}
-            {places}
-            manual={!!manual[profile.id]}
-            sentTo={manual[profile.id]}
-            {held}
-            onsend={(place) => send(profile.id, place)}
-            onschedule={() => backToSchedule(profile.id)}
-            onchatstart={() => chatStart(profile.id)}
-            onchatend={() => chatEnd(profile.id)}
-            oncollapse={() => (rightCollapsed = true)}
-            onclose={() => select(undefined)}
-            onitem={(d) => openDelivered(profile.id, d)}
-          />
+          {#await loadStaffCard() then { default: StaffCard }}
+            <StaffCard
+              {...readerProps(snapshot, oddsNow, profile.id, planHires)}
+              {profile}
+              activity={selectedActivity}
+              {version}
+              show={cardShow?.id === profile.id ? cardShow : undefined}
+              {places}
+              manual={!!manual[profile.id]}
+              sentTo={manual[profile.id]}
+              {held}
+              onsend={(place) => send(profile.id, place)}
+              onschedule={() => backToSchedule(profile.id)}
+              onchatstart={() => chatStart(profile.id)}
+              onchatend={() => chatEnd(profile.id)}
+              oncollapse={() => (rightCollapsed = true)}
+              onclose={() => select(undefined)}
+              onitem={(d) => openDelivered(profile.id, d)}
+            />
+          {/await}
         </div>
       {/key}
     </SidePanel>
@@ -1514,6 +1577,14 @@
         {firstRun ? 'Welcome' : `Opening ${office.name}`}
       </div>
     </div>
+  {/if}
+  {#if actCheck.asking}
+    {#await import('#lib/ui/ActCheck.svelte') then { default: ActCheck }}<ActCheck />{/await}
+  {/if}
+  {#if actCheck.choosing}
+    {#await import('#lib/ui/HandOffChoice.svelte') then { default: HandOffChoice }}
+      <HandOffChoice name={actCheck.choosing} />
+    {/await}
   {/if}
 </main>
 

@@ -6,11 +6,19 @@ pokes (one-time chat messages an Odd sets for later), reports, connectors and gr
 windows, the names the owner gives the rooms, the owner's goals and who serves
 them, the lessons the owner teaches the Odds, the app's updates, and the ledger itself.
 Drizzle ORM over the `postgres` driver. Server only, except `./time`,
-`./tools`, `./agents`, `./access`, `./grantable`, `./goals`, `./update-window`, `./work-paths`, `./desk-answers`, `./live-tables` and `./filters`, which the page may import.
+`./tools`, `./agents`, `./access`, `./grantable`, `./goals`, `./update-window`, `./work-paths`, `./desk-answers`, `./live-tables`, `./filters`, `./system-words` and `./lesson-rules`, which the page may import.
+`./sequences` is for tests in any package, never the page.
 
 `src/run-registry.ts` holds each live run, its stop handle and its work in
 progress. `reserveRun` and `releaseRun` own its lifetime; the office derives
 its slot queue and chat state from these entries. It holds no saved office data.
+
+`src/work/` is the work core: what happens to threads, follow-ups, asks and
+tasks, as events (`WorkEvent` in `src/work/events.ts`), each decided by one
+pure function (`DECIDERS` in `src/work/decide.ts`) and written in one
+transaction (`transitionWork` in `src/work/apply.ts`, over `transition` in
+`src/transition.ts`). `docs/architecture.md` says how a system that keeps
+state takes this shape.
 
 Where a new kind of thing starts, the shared function for each job, and the
 check that catches a missed place: `docs/architecture.md`.
@@ -22,19 +30,37 @@ check that catches a missed place: `docs/architecture.md`.
 and `data/`, the folder every Odd may read. `CODE` is the code
 (`ODDBORO_CODE`, else this repo; the app's `Resources/server` in a release).
 `OFFICE_PORT` and `DATABASE_PORT` come from `ODDBORO_PORT` and
-`ODDBORO_DB_PORT` (4500 and 54329). `STAFF_SERVER` is `mcp.ts` beside it, or
+`ODDBORO_DB_PORT` (4500 and 54329); only Windows uses `DATABASE_PORT`.
+`makeHomePrivate()` sets the home to 0700 as the office starts, so no other
+account on the computer opens it. `STAFF_SERVER` is `mcp.ts` beside it, or
 `mcp.js` in a release, and `FILES_SERVER` the file tools (`files-server.ts`)
 the same way. Never write `~/.oddboro` or a port anywhere else.
 Under `node --test` (`NODE_TEST_CONTEXT`), with no `ODDBORO_HOME`, `home()` is
 a folder under the system's temp folder, made on first use and removed at
 exit, and with no `ODDBORO_DB_PORT`, `DATABASE_PORT` is 54399: a test never
 reaches the owner's real office (`test/home.test.ts`).
+Both packages' test scripts also load `test/test-defaults.ts` with `--import`,
+before any test module: each test process gets a temp `HOME` and `USERPROFILE`
+and a `PATH` of node plus the system's own folders, so no test finds the
+developer's AI tools or settings unless it stands one in. It imports only
+Node's own modules, so it cannot load a module a test means to mock.
+`test/tools-on-path.ts` lists which of some commands a process could start
+from its `PATH`, for the tests that hold that. Under test `src/secrets.ts`
+starts with a store whose every use throws, naming the stand-in to load,
+until a test stands one in (or sets `ODDBORO_SECRETS=system` to test the
+system's own store with its command stubbed).
 
 1. With no `DATABASE_URL` in `.env`, the office keeps its own Postgres:
    PGlite inside the office server, files in `~/.oddboro/db`, with
-   pgvector. `src/local-db.ts` starts it and serves it on 127.0.0.1:54329 (`DATABASE_PORT`),
-   where every other process reaches it through `DATABASE_URL`, which
-   `src/db.ts` fills in. A `DATABASE_URL` in `.env` (Postgres in Docker from
+   pgvector. `src/local-db.ts` starts it and serves it on a socket,
+   `.s.PGSQL.5432` in the office home (`LOCAL_DATABASE_SOCKET`), or on Windows
+   on 127.0.0.1:54329 (`DATABASE_PORT`). Every other process reaches it
+   through `DATABASE_URL`, which `src/db.ts` fills in from the office home, as
+   `postgres://postgres:postgres@localhost/postgres?host=<home>`, the form psql
+   reads. `openPool()` opens a pool on any such URL. An office that finds
+   another one answering on its socket stops before it opens the files, and a
+   path too long for a socket stops it with the reason
+   (`test/local-db.test.ts`). A `DATABASE_URL` in `.env` (Postgres in Docker from
    `npm run db:up`, or hosted) takes its place.
 2. The office server brings the tables up to date as it starts
    (`src/upgrade.ts`: pgvector, then `migrations/`). `npm run db:migrate`
@@ -60,6 +86,11 @@ reaches the owner's real office (`test/home.test.ts`).
    `<home>/db` to `<home>/backups/pre-<version>-<time>/db`. It compares
    `ODDBORO_VERSION` with `<home>/version`, the version that last started, and
    keeps the 3 newest copies. Development (no `ODDBORO_VERSION`) never copies.
+   Before that, a restore the owner chose goes in (`src/office-backup.ts`,
+   `applyStagedRestore`): the office as it is is copied into
+   `<home>/backups/before-restore-<time>`, then each part of the backup takes
+   its place. Those copies are never pruned. Their name keeps clear of the
+   `pre-` pattern, which the update copies' pruning counts.
 5. `npm run reset` starts the office over: it moves `~/.oddboro/db`, the
    Odds' homes, the threads' folders and the office's notes into `~/.oddboro/backups/<time>/`
    and clears the office's keys from `.env`, the owner's answer about
@@ -75,11 +106,15 @@ office sets on that server what it needs from `.env` (`DATABASE_URL`,
 `OFFICE_TIME_ZONE`, `OFFICE_AGENT`; `access` in the office's `staff.ts`), and
 the server never depends on reading it.
 
-`npm test -w @oddboro/ledger` runs `test/` with `node --test`, and fails any
-test that runs past 15 seconds (`--test-timeout=15000`), or 45 seconds for the
-one test that sets its own limit (the three-server `propose_filter` test in
-`test/filters.test.ts`, 15 seconds per server), so a test past its timeout
-fails. A run that never exits, from a handle a test left open, CI ends at the
+`npm test -w @oddboro/ledger` runs `test/` with `node --test`. First
+`test/global-setup.ts` makes one database with every migration, and each file
+opens a copy (`tool-server.ts`, `pglite.ts`) instead of making and migrating
+its own; a file run on its own makes its own. It fails any
+test that runs past 15 seconds (`--test-timeout=15000`), or past its own
+limit for the two tests that start several tool servers, at 15 seconds per
+server: 45 for the `propose_filter` test in `test/filters.test.ts`, 60 for
+the shared-project test in `test/project-tools.test.ts`. So a test past its
+timeout fails. A run that never exits, from a handle a test left open, CI ends at the
 test step's timeout (`timeout-minutes: 10` on each test step in
 `.github/workflows/ci.yml`). The
 script never passes `--test-force-exit`: under it a run once reported 1,015 of
@@ -134,6 +169,31 @@ and a hire's starting values.
 hand-off or number, which ledger tests and the office's format test share.
 `test/deliveries.test.ts` holds when the owner decided each ask.
 
+## Ledger search
+
+The search model is Nomic Embed Text v1.5 in int8 ONNX, 137 MB. The office
+downloads it from Oddboro's own GitHub release (`models-v1`, a pre-release the
+app's updater ignores), and `src/search-model.ts` pins each file's size and
+SHA-256. The files are Nomic's own, unchanged, from the Hugging Face revision
+the code names. A download follows redirects only over HTTPS to GitHub's own
+hosts (`DOWNLOAD_HOSTS`) and refuses any other.
+It lives in `models/nomic-embed-text-v1.5/` in the office home, which a
+backup leaves out. Setup's ledger search line (`checkSearch`) offers the
+download; `POST /api/setup/search` in the office runs it. The files arrive
+in a folder of their own and move into place only when every one matches
+its pin. `src/embed.ts` runs the model through onnxruntime-node, loaded once
+per process on the first text after its files pass their checksums again,
+and tokenizes with `src/wordpiece.ts`. It prefixes `search_document: ` or
+`search_query: `, reads at most 2048 tokens, and takes the mean, layer norm
+and length 1, as Nomic says. A file that fails its checksum is removed, so
+Setup offers the download again. onnxruntime-node's install script, which
+would download CUDA libraries on Linux, never runs: the root `package.json`
+denies it in `allowScripts`. Its npm package has no build for an Intel Mac;
+there `checkSearch` says so and the ledger is searched by its words. Tests
+run a stand-in model (`test/stand-in-model.ts`) and never download; set
+`ODDBORO_TEST_SEARCH_MODEL` to a folder with the real files to run
+`test/search-model-real.test.ts`.
+
 ## Files
 
 `FILES.md` lists each file in this package and what it holds.
@@ -148,7 +208,9 @@ for the owner's Take over and send, whatever its level, unless
 `project_sessions.sends_unasked` names that Odd and it is at Act
 (`letSendUnasked`); `requestProject` and `claimProject` both check.
 `src/project-session-tools.ts` is the local Claude plugin's tool server, with
-no database credentials. `src/project-terminal.ts` opens the native terminal
+no database credentials. It and `src/project-watch.ts`, the plugin's monitor,
+answer fresh readiness probes through `src/project-receiver.ts` before the
+office offers work. `src/project-terminal.ts` opens the native terminal
 through node-pty, an optional dependency loaded on the first open. Migration
 `0027_project_sessions` adds `project_sessions` and `project_requests` with
 their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
@@ -161,8 +223,16 @@ their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
 - The ledger is append-only. Fix a mistake with a new row, never an edit.
 - Every table the page shows has a trigger that NOTIFYs `office` with its
   name. A new table the page shows gets one in a migration.
-- Text is embedded once, when it is written, never in a loop. With Ollama
-  down the row is still written, and search falls back to words.
+- Text is embedded once, when it is written, never in a loop, inside the
+  process that writes it (`src/embed.ts`). Until the owner downloads the
+  search model from Setup, or when it cannot run, the row is still written
+  with no vector, and search goes by words. Nothing about it leaves the
+  computer but the one download (`src/search-model.ts`).
+- A row's vector is the one thing the office changes after the row is
+  written: the re-index (`reindexLedger`) makes it again, with
+  `embedding_model` naming the model, once the model arrives and as the
+  office starts while rows are owed. It touches no other column, so the
+  Ledger window hears nothing of it.
 - `STAFF_ID` is set by the office when it starts `src/mcp.ts`. A tool acts as
   that Odd and no other. In a chat, the office also sets `OWNER_SAID` to
   the owner's message. An Odd changes its own jobs or job description only with
@@ -175,7 +245,7 @@ their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
   desk, with where each stands; the office shows them in its chat. A folder
   or switch ask also carries its folder (shown, as the Desk shows it), its
   switches and its why, so the chat can show the card. Answering it still
-  goes through `giveFolder`, or approval and `turnOnSwitches`, as on the
+  goes through `giveFolder`, or approval and `changeOwnTools`, as on the
   Desk, and `chat` reaches only the carry-out of the ask answered there. No
   migration.
   `replyToReport` is the owner's feedback, given as a chat reply: it marks the
@@ -183,7 +253,8 @@ their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
 - A follow-up (carry out an approved ask, rework one the owner sent back, pick
   up after a task the owner finished, read why the owner said no, read the
   owner's edit to a file) runs once. Older rows may also be
-  `feedback`, from before feedback became a chat reply. `startFollowUp` claims it in the
+  `feedback`, from before feedback became a chat reply; such a row reads as
+  ended and never runs (`RETIRED_KINDS` in `src/work/state.ts`). `startFollowUp` claims it in the
   database before the run, and `finishFollowUp` records the outcome. An Odd
   runs once at a time on a thread: any follow-up on one but a `hand_off`
   waits while a run of the same Odd there has yet to end (`waitsOnOwnRun`),
@@ -194,7 +265,7 @@ their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
   ask or task its hub names the thread for (`raiseAsk`, `giveTask`). The
   office gives every run a key (`RUN_KEY`) and keeps it in `runsGoing` while
   the run goes, and the thread keeps the key of its hub's runs only
-  (`threads.runs`, `keepRun`): a key holds the hub's pick-ups whoever's run it
+  (`threads.runs`, `keepRun` in `src/work/hand-offs.ts`): a key holds the hub's pick-ups whoever's run it
   is, so a colleague's would stall the lead. The tool server writes the key, in a process of its own, so it
   goes in the database; which keys still go lives in memory only, so a
   restart frees every hold and no key needs clearing. One
@@ -269,8 +340,10 @@ their change triggers; `0028_advanced_mode` adds `owner.advanced_at` and
 FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   takes too), and `ask_for_folder` refuses it (`FOLDER_REFUSED.broad`).
   `setFolder()` finds a folder the Odd has by that real
-  path, so a level change replaces it, and refuses a new one inside or
-  holding another the Odd has (`FOLDER_REFUSED.nested`). A stored folder no
+  path, so a level change replaces it. Folders may sit one inside another,
+  but a folder only to read is refused inside or around one to change, by a
+  new folder or a level change (`FOLDER_REFUSED.readInsideChange`,
+  `nestRefused`). A stored folder no
   run gets (`touchesSecretStore()`) does not count for a folder inside it, so
   the owner can give a clean one there, and still counts for a folder that
   would hold it, which would put its store in a run; `folderAskRefused` does
@@ -312,6 +385,13 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   (`lockDesk`), so two tool servers at once cannot both pass. `stillOnDesk`
   lists what an Odd has open, for its prompt. `test/once-on-desk.test.ts`
   holds it.
+- A worker requesting access for separately approved or scheduled work sets
+  `connect_only` on `ask_for_access`. Its Desk card explains that approval
+  only connects the tool. A normal request for the same tool still resumes its own work.
+  Its connect task starts no run on the work it was raised on, so the lead may
+  park that work on it (`parked` in `src/work/parking.ts`), and the task's card
+  leaves out that the Odd picks up when it is done (`Desk.connectOnly`).
+  `test/connect-only.test.ts` holds it.
 - An approved access ask with nothing left to connect, or one whose connect
   task the owner finishes, starts a `carry_out` follow-up: the Odd checks the
   tool and does the work that waited on it. Any other task an Odd gave the
@@ -332,8 +412,12 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   from `0024_task_response`, saved by `saveTaskResponse`
   against the version they opened, so a stale save never overwrites newer
   words). Finishing one needs its latest saved version; that text is the
-  owner's answer (`taskAnswer`), and the `task_done` run gets it word for word. A dropped task starts nothing,
-  unless it was given on a hand-off or a thread (below).
+  owner's answer (`taskAnswer`), and the `task_done` run gets it word for word. A dropped task's answer goes
+  back to the hand-off or thread it was given on (below); given on neither,
+  it wakes the Odd that gave it, once, as an `answered` run. Any answer on
+  no work joins that Odd's `answered` run still waiting to start as one more
+  line (`offWorkAnswer`), as answers on a thread join its hub's `resume`, so
+  twenty nos in a row wake it once.
   A denied ask with a reason also starts a `denied` follow-up: the Odd reads
   the reason, keeps a lesson if it says how to work from now on, and never
   carries the ask out. It serves no hand-off and joins no thread
@@ -424,7 +508,7 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   `handed_back` follow-up for the Odd that handed it, a restart's failure
   included, but for two: the colleague's run that ends waiting goes back
   only while something it raised is still open (`answeredAll`), and nothing
-  goes back to a lead that left the office (`leadLeft`). When the
+  goes back to a lead that left the office (`hasLeft` in `handBack`). When the
   owner answered all of it before the run ended, the answer already went
   back, or started a run whose result will. When the lead left, the
   colleague pokes the owner that it finished and could not hand it back, the
@@ -432,7 +516,10 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   (`Unreturned`). Results that land while the hub
   runs on the thread wait, and the next pick-up takes them all
   (`resultsToJoin`, named in its brief); they end with it. Both runs work at
-  Draft at most.
+  Draft at most, but the colleague's own run keeps its level when the owner
+  lets it act on its own on work from colleagues (`staff.acts_on_hand_offs`,
+  chosen with each raise to Act, `0032_colleague_hand_offs`). Its brief then
+  says so (`handOffBrief`'s `acts`). The hub's pick-up stays at Draft.
 - Every hand-off is a step in a thread (`src/threads.ts`, the `threads`
   table). An Odd's `hand_off` with no goal opens one with that Odd as the hub; with a goal it goes on the goal's thread. One goal is
   one thread (`goalThread`): led by the manager, or by the Odd opening it when
@@ -440,11 +527,11 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   it and every hand-off for it (`hand_off` with `goal`), and counts no
   hand-off as it opens. Only its lead hands on there, so a hire serving the
   goal joins it as a colleague. An Odd that serves a goal and has no job leads
-  no thread: `openThread`, the one place a thread is opened, refuses it
+  no thread: `assertMayLead`, checked wherever a thread is opened, refuses it
   (`LEADS_NONE`), whatever tool or run got there; the manager is never refused.
   A finished goal thread is found as it is, so a goal never gets a second: an
-  ask or task raised on it opens it again (`raisedOn`), and so does the lead's
-  next hand-off (`takeHandOff`), so a lookup alone, such as a hand-off the
+  ask or task raised on it opens it again (`raisedOn` in `src/work/threads.ts`), and so does the lead's
+  next hand-off, so a lookup alone, such as a hand-off the
   office refuses, changes nothing. A stopped one stays stopped: a hand-off
   there is refused, and only a new plan for the goal opens it again
   (`raisedOn` with `plan`), since the plan asks the owner afresh. With no
@@ -462,45 +549,49 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   one stays stopped. A round of work takes up to `HAND_OFF_LIMIT` (8)
   hand-offs; continuing an ended thread starts a new one. `handOffsUsed` is
   this round's; every round's are the thread's `hand_off` follow-ups.
-  `takeHandOff` holds the limit, and `count` is its one check. The hand-off
-  past it waits: `askToKeepGoing` raises one `hand_offs` ask on the thread,
+  The hand-off decider (`handedOff` in `src/work/hand-offs.ts`) holds the
+  limit. The hand-off past it waits: it raises one `hand_offs` ask on the thread,
   holding what the lead chose in `asks.held` (the colleague, title and
   brief), and while that ask is open no other hand-off goes. The office raised it, so it
   takes a yes or a no only (`yesOrNo` in `src/tools.ts`). A yes
-  (`startHeld`, in the transaction that claims the ask, so a stop between
+  (`start_held` in `src/work/asks.ts`, in the transaction that claims the ask, so a stop between
   them cannot lose it) starts the held hand-off as the first of a new round,
   with what it carries worked out at the yes (`sharing`), so its result
   brings the hub back; the hub hears the yes itself only when
-  the owner wrote something with it. A no stops the thread, the held hand-off
+  the owner wrote something with it. Past the usage window's guard the yes
+  does not start it: the thread waits for the window as a new hand-off's
+  does (below), its round starts afresh, and the hub wakes now to hear that
+  it hands it on again once the work picks back up. A no stops the thread, the held hand-off
   never goes, and the hub wakes to say where the work stands. An ask raised
   before asks held their hand-off wakes the hub to hand on again. The hub moves it on by a colleague finishing, by
   `resume_at` (`parkThread`; the office clock calls `wakeThread`, which starts
   a `resume` follow-up), by `resume_at`'s `after_task` (`parkOnTask`, which takes
   only a task the hub gave or one on work it is on, any other reading as no
-  task, sets `threads.resume_on_task` and clears the time; `wakeOnTask` wakes it when the
-  task is done or dropped, or taken off the desk (`withdrawTask`, as the task's Odd leaves
-  the office or through its `withdraw` tool), which wakes it as a drop does, and says which,
+  task, sets `threads.resume_on_task` and clears the time; `wakeParked` wakes it when the
+  task is done or dropped, or taken off the desk (as the task's Odd leaves the office,
+  `oddRemoved` in `src/work/leaving.ts`, or through its `withdraw` tool, `withdrawTask`), which wakes it as a drop does, and says which,
   and when a run on the task's own work picks up too, names that work, whose lead carries its
   own part (never a lead that left the office, which runs nothing), or for a task on no work
-  says another run of the hub's does; a stopped thread loses its park, whether the owner
+  says another run of the hub's does, as one does when the owner finishes or drops it (`OWN_RUN`):
+  never when it is taken off the desk; a stopped thread loses its park, whether the owner
   stopped it or its hub left the office (`removeOdd`); and the
   hub's next run on the thread ends a park on a task or a time as it starts, whatever starts it,
   and is told the wait ended (`startFollowUp`), while a colleague's run, a pick-up still waiting
   on the hub's run and a usage-window hold leave it; when that run ends failed having parked
   nothing again, the park comes back on its task or its time (`follow_ups.unparked_task`,
   `follow_ups.unparked_at`, `finishFollowUp`): had the task ended during the run, it wakes the
-  work as `wakeOnTask` would have (`endedAs` reads a withdrawal from `tasks.withdrawn`, and
+  work as `wakeParked` would have (`endedAs` reads a withdrawal from `tasks.withdrawn`, and
   `ownRunOf` names no run on stopped work, so an Odd brought back since changes neither),
   and a time that passed is left for the clock's `wakeThread`,
   which wakes it once), or by the owner answering an ask or task raised on it
-  (`asks.thread_id`, `tasks.thread_id`; `answerThread` when no run follows,
+  (`asks.thread_id`, `tasks.thread_id`; `answerLead` when no run follows,
   carrying the ask, so an approved goal plan starts the hub leading its work).
   An answer that comes while the hub's `resume` has yet to start joins it as
   one more line, so hires landing together wake the hub once, and the claim
   returns the row as joined (`startFollowUp`), so the run reads every line.
-  Every follow-up on a thread is written through `addFollowUp`, which settles
-  the thread's holder and status (`settleThread`, the one place status is
-  worked out; `askToKeepGoing` settles it too): the status is open until the
+  Every follow-up on a thread is written through the work core, which settles
+  the thread's holder and status (`settle` in `src/work/threads.ts`, the one place status is
+  worked out): the status is open until the
   work ends, and an ask or task raised on it that is still open keeps it
   open, however the hub's last run ended. Whether it waits on the owner is
   never stored: `stageOf` reads it from the desk. Each hub run on its thread gets
@@ -529,9 +620,10 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   lists a goal's under it, and every thread for no goal still under way or
   waiting as other work.
 - New hand-offs to Odds on Claude Code wait while the plan's 5-hour usage window is nearly used up
-  (`src/usage-window.ts`). Runs report the share used and the reset time
+  (`handedOff` in `src/work/hand-offs.ts`), and so does a held one the owner
+  says yes to (`start_held`): both ask `windowHolds`. Runs report the share used and the reset time
   (`plan_limits`); the window's size in tokens is not known. Past
-  `WINDOW_GUARD` (85%), `holdForWindow` in `takeHandOff` refuses each new
+  `WINDOW_GUARD` (85%), the hand-off decider refuses each new
   hand-off to an Odd on Claude Code without counting it (one to an Odd on
   another tool goes), parks its thread until the reset
   (`resume_at`, with `threads.held_by` naming the ask; a finished one opens
@@ -539,11 +631,13 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   `plan_limits` so two hand-offs raise one. The ask is office-wide, so it is
   filed under the manager (`manager`), or under the hub that hit the guard
   when the office has none. In an office with Odds on other tools, its why
-  names the Odds on Claude Code. A yes (`answerWindow`) lets
+  names the Odds on Claude Code. A yes (`answerWindow` in `src/work/asks.ts`) lets
   hand-offs run until the reset and wakes the held threads through
-  `answerThread`; a no leaves them held. The clock's `wakeThread` wakes each at
-  the reset with `WINDOW_RESET`, and takes an ask nobody answered off the desk
-  once it holds no thread (`windowWoke`). A hub's own `resume_at` replaces a
+  `answerLead`; a no leaves them held. The clock's `wakeThread` wakes each at
+  the reset with `WINDOW_RESET` (`clockWoke` in `src/work/parking.ts`). At the
+  reset the clock also takes an ask nobody answered off the desk with
+  `withdrawAsk`, whatever work it still holds (`windowAsksDue` in
+  `src/office-usage.ts`). A hub's own `resume_at` replaces a
   hold. A run already going is never stopped. The office raised the ask, so a
   no starts no `denied` run, and it cannot be sent back.
 - What an Odd sees through a thread is no wider than its own access
@@ -571,7 +665,7 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   (`onStories`, `threadOnKnown`), and may read the thread's folder. `tell_lead`,
   offered only with `OWNER_SAID` set and such a thread, passes the owner's
   words about one to its lead (`tellLead`). The words must be in `OWNER_SAID`;
-  the lead picks the thread up through `answerThread`, joining a `resume` that
+  the lead picks the thread up through `answerLead`, joining a `resume` that
   waits. It refuses a thread the Odd leads, one it does not work on, and a
   stopped one. The lead wakes to read the owner's words, the colleague's own
   reading, labelled as not the owner's, and the last exchange in that chat,
@@ -609,7 +703,8 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   office sets `HAND_OFF_ID` for those runs). `servesHandOff` finds it for the
   follow-up an answer starts, and `finishFollowUp` hands that result back once
   it ends done or failed. With no run to follow (a denial, a dropped task, an
-  approved hire), `handBackLater` sends the owner's answer itself.
+  approved hire), the answer itself goes back (`answerBack` in
+  `src/work/answers.ts`).
 - A `reply` ask carries one email in `asks.reply` (`ReplyDraft`), raised by
   `propose_reply`, which every Odd has (`always` in `tools.ts`, so no hire's
   tool list can leave it out) and `mcp-mail.ts` offers only while it holds a Gmail
@@ -654,8 +749,9 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   real path `checkFolder` gave and `read` or `write`), raised by
   `ask_for_folder`, which every Odd has (`always`). The tool refuses at once
   with the Settings tab's words (`FOLDER_REFUSED`), and refuses a folder the
-  Odd has at that level or above, or one `setFolder` would refuse as nested
-  (`folderAskRefused`). `raiseAsk` refuses a repeat from the same place (the
+  Odd has at that level or above, or one `setFolder` would refuse beside the
+  folders it has (`folderAskRefused`, with `nestRefused`). `raiseAsk` refuses
+  a repeat from the same place (the
   same hand-off and thread, `AlreadyOnDesk`) unless it `revises` it; one from
   another place for the same folder at the same or a lower level is a twin
   (`asksNoMore`, as access asks are). Only the office approves one, with
@@ -673,10 +769,34 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   them (`switchAskRefused`, `commandsHow`). `raiseAsk` refuses a repeat from
   the same place that one open covers; one from another place asking no more
   is a twin (`asksNoMore`). A plain approve turns them on in the transaction
-  that approves it (`turnOnSwitches`), refused and left open when the Odd's
+  that approves it (`changeOwnTools`, the Settings tab's own change), refused and left open when the Odd's
   tool can no longer run commands, with one ledger line in the Settings tab's
   words and its network note, and starts one `carry_out` per place
   (`carryOutTogether`). `test/switch-asks.test.ts` holds it, the tool included.
+- A `level` ask carries the level an Odd asks for in `asks.level`, raised by
+  `ask_for_level`, and an `office_tool` ask the office tools it asks for in
+  `asks.office_tools`, raised by `ask_for_office_tool`. Every Odd has both
+  (`always`), the Office Manager and persona Odds included. The level tool
+  refuses a level the Odd holds already or passed; the office tool tool takes
+  only tools the Settings tab grants (`GRANTABLE_TOOLS`), leaves out ones the
+  Odd has, and refuses when it has them all. `raiseAsk` treats one from
+  another place asking no more as a twin (`asksNoMore`). A plain approve makes
+  the Settings tab's own change (`grantSetting`: `changeLevel` or
+  `changeTools`) in the transaction that approves it, with the Settings tab's
+  ledger words. A yes never lowers a level set higher since, and starts
+  one `carry_out` per place (`carryOutTogether`); after a raise to Act, a
+  colleague's hand-off and a thread picked back up still run at Draft at
+  most, and so does every run that serves a colleague's hand-off, such as the
+  carry-out of a level, office tool or outside tool ask raised in one. The one
+  exception is the carry-out of an approval ask, the owner's yes to that exact
+  action, which runs at the Odd's level so one yes stays one yes. A raise to
+  Act also takes the owner's choice for work from colleagues
+  (`actsOnHandOffs`, passed to `decideAsk`, `setPermission` and `hire`, and
+  changed alone by `setActsOnHandOffs`): on, the hand-off and every run that
+  serves it keep the Odd's level, and a change writes its own access line
+  (`HAND_OFF_CHOICE` in `access-words.ts`). Left out, the stored choice
+  stays; a move down never changes it.
+  `test/setting-asks.test.ts` holds it, the tools included.
 - A `call` ask carries one held call in `asks.call` (`HeldCall`: the
   connector, the tool and its exact arguments), raised by the office's gateway
   (`raiseCall`) when an Odd at Draft calls a tool that changes something
@@ -690,8 +810,12 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   `apps/office/src/lib/server/gateway.test.ts` holds it.
 - A standing yes is a list of a write grant's tools the Odd uses without
   asking (`grants.standing`, `src/standing.ts`): at Draft the gateway passes a
-  call to one of them on instead of holding it, in any run with a place, so a
-  hand-off's too, never a lesson run. A `standing` ask carries the tools in
+  call to one of them on instead of holding it, in any run with a place,
+  never a lesson run, and in a run that serves a colleague's hand-off, or a
+  lead's pick-up of a colleague's result (`FROM_COLLEAGUE`), only
+  when the owner lets that Odd act on its own on work from colleagues
+  (`staff.acts_on_hand_offs`; `handedOver` in `capabilities.ts` empties the
+  list otherwise, so each call waits for the owner's yes). A `standing` ask carries the tools in
   `asks.standing` (`StandingRequest`), raised by `ask_for_standing_yes`, which
   every Odd has (`always`) and is offered only while it holds a grant at
   write (`withWrite` in `tools.ts`). The tool refuses an Odd at Act, whose calls go through already, a service not held at write, a tool the
@@ -741,7 +865,8 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   Odd's own open asks and tasks off the owner's desk when the owner says so.
   An ask goes through `withdrawAsk` (the office's no, quoting the owner's
   words, no `denied` run, a held call never made), a task through
-  `withdrawTask`; anything not the Odd's or not open is left as it is.
+  `withdrawTask`; anything not the Odd's, or that the owner answered first, is
+  left as it is.
   `test/withdraw.test.ts` holds it.
 - `draft_bug_report`, every Odd's, offered only in a chat (`OWNER_SAID`),
   keeps a bug report's title and details for the run in the Odd's folder
@@ -749,6 +874,11 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   office takes it once as the chat run ends (`takeBugDraft`) and puts it on
   the reply, where File this opens the report form. It files nothing.
   `test/bug-drafts.test.ts` holds it.
+- `oddboro_update`, every Odd's and only in owner chat, reads the office's
+  run-start update status and keeps a status or check request for its reply
+  (`src/chat-updates.ts`). A successful reply shows the existing Updates
+  controls. The tool never installs or restarts; Install now is the owner's
+  action. `test/chat-updates.test.ts` holds that limit.
 - An Odd leaves the office only on the owner's yes, and can come back
   (`src/leaving.ts`). `staff.left_at` marks one that left; the row and its
   history stay. `staffer()` and `roster()` find working Odds only, so a run,
@@ -757,15 +887,16 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   a new hire's id, and `formerStaff()` lists them. The job clock, the
   follow-up queue, pokes and the desk also skip its rows (`ofWorkingOdd`), as
   a second wall. The owner's Remove (DELETE on the staff route) and a yes to a
-  `remove` ask both call `removeOdd`: in one transaction the Odd leaves, its
+  `remove` ask both call `removeOdd`, one change through the work core
+  (`oddRemoved`) that is saved whole or not at all: the Odd leaves, its
   jobs on turn off and are kept in `staff.jobs_off`, its waiting pokes are
   cancelled and threads it leads stop, with any task, time or usage-window
-  hold they waited on cleared; then each open ask of it or about it is
-  withdrawn (`withdrawAsk`: a no by the office, its line going back, no
-  `denied` run), each open task dropped (`withdrawTask`), each follow-up it has
-  yet to start fails, so a lead that handed it work hears at once, and the
-  office stops any run of it (`whenOddLeaves`). Nothing wakes it after
-  (`answerThread` skips a lead that left). A follow-up on work it led ends
+  hold they waited on cleared; each open ask of it or about it is withdrawn
+  (a no by the office, its line going back, no `denied` run), each open task
+  dropped, and each follow-up it has yet to start fails, so a lead that
+  handed it work hears at once. Once that is saved, the office stops any run
+  of it (`whenOddLeaves`). Nothing wakes it after
+  (`answerLead` skips a lead that left). A follow-up on work it led ends
   with no report, and a colleague's result waiting there is told to the
   owner by that colleague (`Unreturned`). A yes to `bring_back` calls
   `bringBack`, which turns on the jobs in `jobs_off` from now. What it had open
@@ -787,20 +918,29 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   ask, with a note. The
   office approves a hire with `approveHire` (`src/goals.ts`), which links the
   goal in the transaction that approves the ask, so a link that fails leaves
-  the proposal open and wakes nobody.
+  the proposal open and wakes nobody. Raised on no work, the yes wakes the
+  Odd that proposed it with an `answered` run, which carries the owner's note.
 - Goals are the owner's. An Odd never sets one: `propose_goal` raises a
-  `goal` ask, and `approveGoal` sets it. Setting one (`addGoal`) starts a
-  `goal` follow-up for the Office Manager to plan it, and the first goal makes
-  the manager's weekly review job. A `plan` ask (`propose_goal_plan`) holds
+  `goal` ask, and `approveGoal` sets it. Setting one, on its yes or by
+  `addGoal`, opens the goal's work under the Office Manager with a `goal`
+  follow-up there to plan it (`planGoal` in `src/work/threads.ts`), and the
+  first goal makes the manager's weekly review job. A `plan` ask (`propose_goal_plan`) holds
   every part of one goal's plan in `asks.plan`, and `raiseAsk` puts it on the
   goal's one thread (`goalThread`), whatever run raised it, and the thread
-  keeps that run's key when its raiser leads it (`keepRun`).
+  keeps that run's key when its raiser leads it (`raisedOn` in `src/work/threads.ts`).
   `approvePlan` takes the parts the owner ticked: Odds already here serve the
   goal in the transaction that approves the ask and get their job at once,
   and the answer names each Odd by name, never its id. Each hire becomes its own hire ask on the
-  plan's thread, and the owner's steps a task. `approveAsk` does all that
-  before the answer goes back, so the hub's run finds it. Hiring one of those
+  plan's thread, and the owner's steps a task. `approveAsk` does all that in
+  the transaction that approves the ask, so the hub's run finds it, and a
+  part that fails leaves the whole plan open. Hiring one of those
   hires answers its ask on the thread, which brings the hub back again.
+- An Odd's skills (`staff_skills`, `src/staff-skills.ts`) are text the owner
+  attached, one SKILL.md each by name. Only the owner changes them, and only
+  against the copy they reviewed (`setSkill`). A run's prompt lists each name
+  and when to use it; `read_skill` (`src/mcp-skills.ts`) gives the Odd its own
+  skill's text, and is offered only while it has one (`withSkills`). A skill
+  grants nothing.
 - An Odd sees only the goals it serves (`staff_goals`): `my_goals` and its
   prompt read `goalsFor`, never `allGoals`. `log_progress` takes a goal it
   serves or whose thread it leads (`logProgress`), so the lead planning a goal
@@ -837,16 +977,24 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   checker then names every other place.
   - To add an ask kind, start at `ASK_KINDS` in `src/schema.ts`, then its row
     in `OWNER_ANSWERS` (`src/desk-answers.ts`), which says what each answer
-    does.
-  - To add a follow-up kind, start at `FOLLOW_UP_KINDS` in `src/schema.ts`,
-    then its rows in `AT_DRAFT` and `SERVES_NO_THREAD` (`src/hand-offs.ts`).
+    does. The type checker then names the rest: `TWINS` (`src/work/twins.ts`),
+    the repeat guard's switch in `raiseAsk` (`src/office-asks.ts`),
+    `grantSetting` (`src/office-decide.ts`), the office's
+    `carriedLinesOf` and `carryOutBrief` switches (`follow-up-brief.ts`),
+    `YES_SAID` (`src/lib/ui/yes-said.ts`), and the `ASK_ROWS` record in the
+    office's `named-tools.test.ts`.
+  - To add a follow-up kind, start at `FOLLOW_UP_KINDS` in `src/work/kinds.ts`,
+    then its rows in `AT_DRAFT` and `SERVES_NO_THREAD` beside it.
+  - To add a work event, start at `WorkEvent` in `src/work/events.ts`, then
+    its row in `WorkResults` beside it and its decider in `DECIDERS`
+    (`src/work/decide.ts`).
   - To add a connector kind, start at `CONNECTOR_KINDS` in `src/schema.ts`.
   - To add a desk item, start at `DESK_ITEMS` in `src/desk-answers.ts`.
   - To add a goal status, start at `GOAL_STATUSES` in `src/schema.ts`, then
     its row in `GOAL_IS_LIVE` (`src/goal-words.ts`).
   - To add an office tool, start at its row in `OFFICE_TOOLS` in
     `src/tools.ts`; a tool registered beside it goes in `RIDES_WITH`. When
-    it is offered (`withGmail`, `withWrite`, `inChat`, `notToManager`, and `prompt` for
+    it is offered (`withGmail`, `withWrite`, `withSkills`, `inChat`, `notToManager`, and `prompt` for
     one that only shapes the prompt and is never offered) is a field on its
     row, which `isOffered` in `src/tools.ts` reads for the tool server
     (`offered()` in `mcp-run.ts`), the Settings tab's Always on group
@@ -887,6 +1035,11 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
   - To read which system the office runs on, call `currentPlatform()` in
     `src/platform.ts`, never `process.platform`, so a test's `onPlatform`
     reaches it. `scripts/check-platform.ts` fails any other read.
+  - To change what Odds are told (a line in `src/capabilities.ts`, or a brief
+    built in this package), accept the change with
+    `npm run prompts:accept -w @oddboro/office`: the office's
+    `prompts.test.ts` holds each kind of run's prompt, and
+    `apps/office/src/lib/server/CLAUDE.md` says how.
 - The owner's name lives in the `owner` table, one row, set per install with
   `setOwnerName()` and read with `ownerName()` ("the owner" until one is set).
   Odd prompts use it, so each install's Odds call the owner by name. Never
@@ -921,17 +1074,19 @@ FOLDER_WARNING }` until the owner accepts it (`accept`, which `giveFolder`
 - On Windows, reach the system through `powershell()` or `powershellSync()`
   with values passed as `env`, never pasted into the script, so nothing needs
   quoting.
+- Start an asynchronous one-shot command through `probe()` in
+  `src/platform.ts`, never `execFile`. It says `ok`, `failed`, `missing` or
+  `timeout`, and each caller handles all four, so "not there" never reads as
+  an empty answer and no raw error reaches the owner. It hides the command's
+  window on Windows unless `showWindow`, which only certutil's trust step and
+  `openUrl` use. `test/one-shot-commands.test.ts` holds both.
 
 ## Later
 
 Each line says what to do when its trigger comes.
 
 - Building NEW-1651 or NEW-1654, whichever comes first: give each run one
-  row of its own, with `runs.jobId` optional, usage pointing at the run, and
-  one reader per tool of that tool's stream.
-- Before any change to what Odds are told (the lines in `capabilities.ts`,
-  the office's `house.ts` or a run's brief): add snapshot tests of each kind
-  of run's prompt, so the change shows as a diff in review.
+  row of its own, with `runs.jobId` optional and usage pointing at the run.
 - Building NEW-1644, or adding an office tool or an AI tool: first write a
   threat model for prompt injection: what a page, file or message an Odd
   reads could make it do, and which wall stops each.

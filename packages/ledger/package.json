@@ -10,15 +10,20 @@
     "./agents": "./src/agents.ts",
     "./first-questions": "./src/first-questions.ts",
     "./access": "./src/access-words.ts",
+    "./act-check": "./src/act-check.ts",
     "./grantable": "./src/grantable.ts",
     "./goals": "./src/goal-words.ts",
     "./checks": "./src/checks.ts",
+    "./embed": "./src/embed.ts",
+    "./search-model": "./src/search-model.ts",
     "./platform": "./src/platform.ts",
+    "./system-words": "./src/system-words.ts",
     "./secrets": "./src/secrets.ts",
     "./env": "./src/env.ts",
     "./errors": "./src/errors.ts",
     "./home": "./src/home.ts",
     "./local-db": "./src/local-db.ts",
+    "./office-backup": "./src/office-backup.ts",
     "./upgrade": "./src/upgrade.ts",
     "./update-window": "./src/update-window.ts",
     "./work-paths": "./src/work-paths.ts",
@@ -27,14 +32,18 @@
     "./live-tables": "./src/live-tables.ts",
     "./filters": "./src/filter-words.ts",
     "./certificates": "./src/certificates.ts",
-    "./project-terminal": "./src/project-terminal.ts"
+    "./project-terminal": "./src/project-terminal.ts",
+    "./sequences": "./src/sequences.ts",
+    "./lesson-rules": "./src/lesson-rules.ts",
+    "./test-defaults": "./test/test-defaults.ts",
+    "./tools-on-path": "./test/tools-on-path.ts"
   },
   "scripts": {
     "generate": "drizzle-kit generate",
     "migrate": "node --env-file-if-exists=../../.env src/migrate.ts",
     "check-types": "tsc -p tsconfig.json",
     "lint": "prettier --check . --ignore-path ../../.prettierignore",
-    "test": "node --test --test-timeout=15000 --experimental-test-module-mocks \"test/*.test.ts\""
+    "test": "node --test --test-global-setup=test/global-setup.ts --test-timeout=15000 --experimental-test-module-mocks --import ./test/test-defaults.ts \"test/*.test.ts\""
   },
   "devDependencies": {
     "drizzle-kit": "^0.31.11"
@@ -48,6 +57,7 @@
     "@oddboro/sprites": "*",
     "@oddboro/world": "*",
     "drizzle-orm": "^0.45.4",
+    "onnxruntime-node": "1.31.1",
     "postgres": "^3.4.9",
     "zod": "^4.6.7"
   },

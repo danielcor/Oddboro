@@ -31,7 +31,9 @@ async function thread(title: string, hubId: string, goalId?: number): Promise<nu
   return id;
 }
 const handed = (staffId: string, threadId: number) =>
-  db.insert(followUps).values({ staffId, kind: 'hand_off', threadId, outcome: 'done' });
+  db
+    .insert(followUps)
+    .values({ staffId, kind: 'hand_off', threadId, outcome: 'done', doneAt: new Date() });
 
 test('an Odd gets the titles of the threads it leads and works on, and of no other', async () => {
   const led = await thread('Vera leads', 'vera');

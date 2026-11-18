@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -325,7 +325,7 @@ fn read_sign_in() -> Option<String> {
         return keychain_sign_in();
     }
     let (program, args) = sign_in_command()?;
-    let read = Command::new(program)
+    let read = crate::host::host_command(program)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -545,6 +545,7 @@ mod tests {
     use crate::server::Server;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::sync::mpsc::Receiver;
 
     /// Words from an owner's office that must never reach a report.
@@ -666,6 +667,29 @@ mod tests {
             .collect()
     }
 
+    /// Whether `word` stands on its own in `body`, not inside a longer name.
+    /// The backtrace holds `std::panicking` and the toolchain's
+    /// `panicking.rs`, so a user named `nic` is inside every report as a
+    /// substring, though their name never reaches it.
+    fn holds_word(body: &str, word: &str) -> bool {
+        let part_of_name = |c: char| c.is_alphanumeric() || c == '_';
+        body.match_indices(word).any(|(at, _)| {
+            let before = body[..at].chars().next_back();
+            let after = body[at + word.len()..].chars().next();
+            !before.is_some_and(part_of_name) && !after.is_some_and(part_of_name)
+        })
+    }
+
+    #[test]
+    fn a_user_name_counts_only_as_a_whole_word() {
+        let frame = "core::panicking::panic_fmt at /rustc/abc/library/core/src/panicking.rs";
+        assert!(!holds_word(frame, "nic"));
+        assert!(!holds_word(frame, "pan"));
+        assert!(holds_word("/srv/nic/code", "nic"));
+        assert!(holds_word("D:\\\\work\\\\nic\\\\code", "nic"));
+        assert!(holds_word("nic", "nic"));
+    }
+
     #[test]
     fn a_panic_reaches_the_door_only_after_yes_without_its_message() {
         let (dsn, door) = door();
@@ -715,14 +739,18 @@ mod tests {
             home.replace('\\', "/"),
         ];
         never.extend(PLANTS.map(String::from));
-        never.extend(
-            ["USER", "USERNAME"]
-                .iter()
-                .filter_map(|name| std::env::var(name).ok())
-                .filter(|v| !v.is_empty()),
-        );
         for word in never {
             assert!(!body.contains(&word), "the report holds {word}");
+        }
+        for user in ["USER", "USERNAME"]
+            .iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .filter(|v| !v.is_empty())
+        {
+            assert!(
+                !holds_word(&body, &user),
+                "the report holds the user name {user}"
+            );
         }
         let hostname = Command::new("hostname").output().unwrap().stdout;
         let hostname = String::from_utf8_lossy(&hostname).trim().to_string();
@@ -749,7 +777,7 @@ mod tests {
             home: dir.clone(),
             log: log.clone(),
             version: String::new(),
-            update_token: String::new(),
+            updates: false,
             diagnostics_dsn: None,
         };
         let why = GaveUp::KeptStopping { code: Some(3) };

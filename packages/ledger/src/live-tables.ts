@@ -32,6 +32,12 @@ export const LIVE_TABLES: Record<TableName, LiveTable> = {
   // the list that made it reads the accounts again (agent-tools.svelte.ts).
   accounts: { trigger: 'all', page: [] },
   goals: { trigger: 'all', page: ['version'] },
+  staff_skills: {
+    trigger: {
+      none: "Written only by the owner on the Odd's info page, which reads its list again after each change."
+    },
+    page: []
+  },
   staff_goals: { trigger: 'all', page: ['version'] },
   goal_progress: { trigger: 'all', page: ['version'] },
   asks: { trigger: 'all', page: ['refresh', 'version'] },

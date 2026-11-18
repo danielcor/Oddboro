@@ -23,8 +23,6 @@ mock.module(new URL('../src/secrets.ts', import.meta.url).href, {
   }
 });
 
-// The ledger rows a grant writes embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const {
   AWS_BUILD_ID,
   AWS_READ_ID,
@@ -107,6 +105,17 @@ test("Secrets Manager keeps its role while another tool's key comes from AWS", a
   await revoke('cole', AWS_SECRETS_ID);
   assert.deepEqual((await configOf(AWS_SECRETS_ID)).aws, role(AWS_SECRETS_ID));
   assert.deepEqual(deleted, []);
+
+  const [cole] = await db.select().from(staff).where(eq(staff.id, 'cole'));
+  await db.insert(staff).values({ ...cole, id: 'river', name: 'River' });
+  await grantAccess('cole', { connector: 'stripe', level: 'read' });
+  await grantAccess('river', { connector: 'stripe', level: 'read' });
+  await revoke('cole', 'stripe');
+  assert.ok((await configOf('stripe')).fromAws?.STRIPE_KEY, 'River still uses the tool');
+  await revoke('river', 'stripe');
+  assert.equal((await configOf('stripe')).fromAws, undefined);
+  assert.equal((await configOf(AWS_SECRETS_ID)).aws, undefined);
+  assert.deepEqual(deleted, ['aws/sso']);
 });
 
 test("Change puts an AWS tool's one step on the desk again, once", async () => {
@@ -126,4 +135,19 @@ test('the owner renames a service, and the Services list shows who holds it', as
   const stripe = (await services()).find((s) => s.id === 'stripe');
   assert.deepEqual(stripe?.odds, [{ id: 'cole', name: 'Cole', level: 'read' }]);
   assert.equal(stripe?.aws, false);
+});
+
+test('two role or Region changes at once give one open task', async () => {
+  const awsSteps = async () =>
+    (await db.select().from(tasks).where(eq(tasks.status, 'open'))).filter((t) =>
+      t.steps.some((s) => s.action?.kind === 'aws' && s.action.connector === AWS_READ_ID)
+    );
+  assert.deepEqual(await awsSteps(), [], 'no change is on the desk yet');
+  const both = await Promise.all([changeAwsTask(AWS_READ_ID), changeAwsTask(AWS_READ_ID)]);
+  const open = await awsSteps();
+  assert.equal(open.length, 1);
+  assert.deepEqual(
+    both.map((t) => t.id),
+    [open[0].id, open[0].id]
+  );
 });

@@ -25,8 +25,10 @@ import { HIRE_DEFAULTS } from './grantable.ts';
 import type { Agent, Effort, GrantedFolder } from './agents.ts';
 import type { FolderAccess, Level, OwnSwitch } from './access-words.ts';
 import type { GmailFilter } from './filter-words.ts';
+import type { FollowUpKind } from './work/kinds.ts';
 import type { MailAttachment } from './mail-attachments.ts';
 import type { PersonaLink } from './personas.ts';
+import type { OfficeToolId } from './tools.ts';
 
 const at = (name: string) => timestamp(name, { withTimezone: true });
 const created = (name = 'created_at') => at(name).notNull().defaultNow();
@@ -43,6 +45,13 @@ export const staff = pgTable('staff', {
   /** The room template it works in. */
   room: text().notNull().default('workspace'),
   permission: text().$type<Level>().notNull().default(HIRE_DEFAULTS.staff.permission),
+  /**
+   * The owner's choice for work another Odd hands it, made each time they put
+   * it at Act: off, that work runs at Draft at most and no standing yes
+   * applies there; on, it runs at the Odd's own level, standing yeses and
+   * all. Kept when the level comes down, and changed on the Settings tab.
+   */
+  actsOnHandOffs: boolean().notNull().default(false),
   /** The coding tool its runs go through. The owner picks it at hire and on the Settings tab. */
   agent: text().$type<Agent>().notNull().default('claude'),
   /** The office tools the owner granted, beyond the ones every staffer has. See tools.ts. */
@@ -80,6 +89,29 @@ export const staff = pgTable('staff', {
 });
 
 /**
+ * The instruction skills the owner attached to a local Odd, one SKILL.md each,
+ * by name. A run's prompt lists each name and description, and the Odd reads
+ * the text with read_skill. A skill is text only: it grants no tool, folder or
+ * permission.
+ */
+export const staffSkills = pgTable(
+  'staff_skills',
+  {
+    staffId: text()
+      .notNull()
+      .references(() => staff.id),
+    name: text().notNull(),
+    /** When to use it, in one line: the file's own, or the owner's. */
+    description: text().notNull(),
+    /** The whole SKILL.md as the owner reviewed it. */
+    text: text().notNull(),
+    createdAt: created(),
+    updatedAt: at('updated_at').notNull().defaultNow()
+  },
+  (t) => [primaryKey({ columns: [t.staffId, t.name] })]
+);
+
+/**
  * The accounts the owner added beyond each tool's Office account, which has
  * no row: a named sign-in for one coding tool, kept in its own folder
  * (`accountHome`). Odds share them.
@@ -99,7 +131,7 @@ export type AccountRow = typeof accounts.$inferSelect;
  * `hand_offs` is the office's ask when a hand-off would pass a round's limit
  * (threads.ts): a yes starts another round, and a no stops the thread. `window` is the
  * office's one ask when the plan's 5-hour window passes its guard
- * (usage-window.ts): a yes lets hand-offs run until it resets, and a no holds
+ * (`handedOff` in work/hand-offs.ts): a yes lets hand-offs run until it resets, and a no holds
  * them until then. `reply` is one email reply an Odd proposes (`asks.reply`):
  * the owner edits it, then the office sends it or saves it to Gmail drafts.
  * `filter` is one Gmail filter an Odd proposes (`asks.filter`): the owner may
@@ -109,7 +141,10 @@ export type AccountRow = typeof accounts.$inferSelect;
  * changes something, held by the gateway for an Odd at Draft (`asks.call`):
  * on the owner's yes the office makes that exact call. `switch` asks for the
  * owner's Run commands or Browse the web switch, or both (`asks.switches`):
- * the owner's yes turns them on. `remove` asks to let an Odd go (`asks.odd`):
+ * the owner's yes turns them on. `level` asks for a higher level (`asks.level`)
+ * and `office_tool` for office tools the owner grants (`asks.officeTools`): the
+ * owner's yes makes the Settings tab's own change (`changeLevel`, `changeTools`).
+ * `remove` asks to let an Odd go (`asks.odd`):
  * an Odd asking to leave names itself, and the Office Manager names another.
  * `bring_back` is the manager's ask to bring back an Odd that left. The owner's
  * yes does it (`removeOdd`, `bringBack`). `catch_up` is the office's ask to
@@ -128,6 +163,8 @@ export const ASK_KINDS = [
   'filter',
   'folder',
   'switch',
+  'level',
+  'office_tool',
   'call',
   'remove',
   'bring_back',
@@ -142,7 +179,12 @@ export type AskStatus = 'open' | 'approved' | 'denied' | 'revise';
  * more Google account of that product: approving it makes a new connector
  * (`addGoogleAccount`) and `connector` then names it.
  */
-export type AccessRequest = { connector: string; level: Level; another?: GoogleProduct };
+export type AccessRequest = {
+  connector: string;
+  level: Level;
+  another?: GoogleProduct;
+  connectOnly?: true;
+};
 /**
  * What a folder ask wants: a folder by its real path (`checkFolder`), to read
  * or to read and change. `given` is set once the owner gave a folder for it:
@@ -350,52 +392,63 @@ export const goalProgress = pgTable(
   (t) => [index('goal_progress_goal_idx').on(t.goalId, t.createdAt)]
 );
 
-export const asks = pgTable('asks', {
-  id: id(),
-  staffId: text()
-    .notNull()
-    .references(() => staff.id),
-  kind: text().$type<AskKind>().notNull().default('approval'),
-  title: text().notNull(),
-  why: text().notNull(),
-  ifApproved: text().notNull(),
-  access: jsonb().$type<AccessRequest>(),
-  hire: jsonb().$type<HireProposal>(),
-  /** A goal ask's goal, set when the owner approves it. */
-  goal: jsonb().$type<GoalDraft>(),
-  /** A plan ask's plan. */
-  plan: jsonb().$type<GoalPlan>(),
-  /** A reply ask's email. */
-  reply: jsonb().$type<ReplyDraft>(),
-  /** A filter ask's Gmail filter. */
-  filter: jsonb().$type<GmailFilter>(),
-  /** A folder ask's folder and level. */
-  folder: jsonb().$type<FolderRequest>(),
-  /** A call ask's held call to an outside tool. */
-  call: jsonb().$type<HeldCall>(),
-  /** A catch_up ask's job, and each missed scheduled time it would fill. */
-  catchUp: jsonb().$type<CatchUp>(),
-  /** A switch ask's switches, Run commands or Browse the web, to turn on (`ask_for_switch`). */
-  switches: jsonb().$type<OwnSwitch[]>(),
-  /** A remove or bring_back ask's Odd (a staff id). */
-  odd: text(),
-  /** A standing ask's tools, to use without asking (`ask_for_standing_yes`). */
-  standing: jsonb().$type<StandingRequest>(),
-  /** The ask this one reworks, after the owner sent that one back. */
-  revises: integer(),
-  /** The hand-off (its `hand_off` follow-up) the staffer raised this while working on. */
-  handOffId: integer(),
-  /** The thread the staffer raised this on: the owner's answer moves it on. */
-  threadId: integer(),
-  /** On a `hand_offs` ask, the hand-off past the limit it held: the owner's yes starts it. */
-  held: jsonb().$type<HeldHandOff>(),
-  /** The colleague whose handed-back work the lead raised this from (a staff id). */
-  via: text(),
-  status: text().$type<AskStatus>().notNull().default('open'),
-  reason: text(),
-  createdAt: created(),
-  decidedAt: at('decided_at')
-});
+export const asks = pgTable(
+  'asks',
+  {
+    id: id(),
+    staffId: text()
+      .notNull()
+      .references(() => staff.id),
+    kind: text().$type<AskKind>().notNull().default('approval'),
+    title: text().notNull(),
+    why: text().notNull(),
+    ifApproved: text().notNull(),
+    access: jsonb().$type<AccessRequest>(),
+    hire: jsonb().$type<HireProposal>(),
+    /** A goal ask's goal, set when the owner approves it. */
+    goal: jsonb().$type<GoalDraft>(),
+    /** A plan ask's plan. */
+    plan: jsonb().$type<GoalPlan>(),
+    /** A reply ask's email. */
+    reply: jsonb().$type<ReplyDraft>(),
+    /** A filter ask's Gmail filter. */
+    filter: jsonb().$type<GmailFilter>(),
+    /** A folder ask's folder and level. */
+    folder: jsonb().$type<FolderRequest>(),
+    /** A call ask's held call to an outside tool. */
+    call: jsonb().$type<HeldCall>(),
+    /** A catch_up ask's job, and each missed scheduled time it would fill. */
+    catchUp: jsonb().$type<CatchUp>(),
+    /** A switch ask's switches, Run commands or Browse the web, to turn on (`ask_for_switch`). */
+    switches: jsonb().$type<OwnSwitch[]>(),
+    /** A level ask's level, above the Odd's own when it asked (`ask_for_level`). */
+    level: text().$type<Level>(),
+    /** An office_tool ask's office tools, ones the Settings tab grants (`ask_for_office_tool`). */
+    officeTools: text().array().$type<OfficeToolId[]>(),
+    /** A remove or bring_back ask's Odd (a staff id). */
+    odd: text(),
+    /** A standing ask's tools, to use without asking (`ask_for_standing_yes`). */
+    standing: jsonb().$type<StandingRequest>(),
+    /** The ask this one reworks, after the owner sent that one back. */
+    revises: integer(),
+    /** The hand-off (its `hand_off` follow-up) the staffer raised this while working on. */
+    handOffId: integer(),
+    /** The thread the staffer raised this on: the owner's answer moves it on. */
+    threadId: integer(),
+    /** On a `hand_offs` ask, the hand-off past the limit it held: the owner's yes starts it. */
+    held: jsonb().$type<HeldHandOff>(),
+    /** The colleague whose handed-back work the lead raised this from (a staff id). */
+    via: text(),
+    status: text().$type<AskStatus>().notNull().default('open'),
+    reason: text(),
+    createdAt: created(),
+    decidedAt: at('decided_at')
+  },
+  (t) => [
+    // States no work change writes (work/state.ts), refused so a bug cannot store one.
+    check('asks_open_undecided', sql`(${t.status} = 'open') = (${t.decidedAt} is null)`)
+  ]
+);
 
 /**
  * One step of a task for the owner. `action` puts a control in the step:
@@ -404,7 +457,8 @@ export const asks = pgTable('asks', {
  */
 export type StepAction =
   | { kind: 'secret'; connector: string; name: string }
-  | { kind: 'oauth'; connector: string }
+  /** `google`: the sign-in is Google's, so the step can name Google's own limits. */
+  | { kind: 'oauth'; connector: string; google?: boolean }
   | { kind: 'aws'; connector: string }
   | { kind: 'postal'; connector: string }
   | { kind: 'choice'; options: string[] }
@@ -419,39 +473,47 @@ export type Step = {
 };
 export type TaskStatus = 'open' | 'done' | 'dropped';
 
-export const tasks = pgTable('tasks', {
-  id: id(),
-  /** The staffer that gave the owner this task, if any. */
-  staffId: text().references(() => staff.id),
-  askId: integer().references(() => asks.id),
-  /** The hand-off (its `hand_off` follow-up) the staffer gave this while working on. */
-  handOffId: integer(),
-  /** The thread the staffer gave this on: the owner's answer moves it on. */
-  threadId: integer(),
-  /** The colleague whose handed-back work the lead gave this from (a staff id). */
-  via: text(),
-  /**
-   * The owner's message in the chat the Odd gave this in (`OWNER_SAID`), so the
-   * run that picks it up hears what they asked for. Null outside a chat.
-   */
-  ownerSaid: text(),
-  title: text().notNull(),
-  why: text().notNull(),
-  steps: jsonb().$type<Step[]>().notNull(),
-  /** The task's working text. Version zero is the Odd's starting text until the owner saves it. */
-  response: text(),
-  responseVersion: integer().notNull().default(0),
-  status: text().$type<TaskStatus>().notNull().default('open'),
-  note: text(),
-  /**
-   * True when the office or the task's Odd took it off the desk (`withdrawTask`),
-   * never the owner. Such a task reads as dropped, so this keeps how it ended,
-   * even once an Odd that left is brought back.
-   */
-  withdrawn: boolean().notNull().default(false),
-  createdAt: created(),
-  doneAt: at('done_at')
-});
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: id(),
+    /** The staffer that gave the owner this task, if any. */
+    staffId: text().references(() => staff.id),
+    askId: integer().references(() => asks.id),
+    /** The hand-off (its `hand_off` follow-up) the staffer gave this while working on. */
+    handOffId: integer(),
+    /** The thread the staffer gave this on: the owner's answer moves it on. */
+    threadId: integer(),
+    /** The colleague whose handed-back work the lead gave this from (a staff id). */
+    via: text(),
+    /**
+     * The owner's message in the chat the Odd gave this in (`OWNER_SAID`), so the
+     * run that picks it up hears what they asked for. Null outside a chat.
+     */
+    ownerSaid: text(),
+    title: text().notNull(),
+    why: text().notNull(),
+    steps: jsonb().$type<Step[]>().notNull(),
+    /** The task's working text. Version zero is the Odd's starting text until the owner saves it. */
+    response: text(),
+    responseVersion: integer().notNull().default(0),
+    status: text().$type<TaskStatus>().notNull().default('open'),
+    note: text(),
+    /**
+     * True when the office or the task's Odd took it off the desk (`withdrawTask`,
+     * or `oddRemoved` as its Odd left), never the owner. Such a task reads as
+     * dropped, so this keeps how it ended, even once an Odd that left is
+     * brought back.
+     */
+    withdrawn: boolean().notNull().default(false),
+    createdAt: created(),
+    doneAt: at('done_at')
+  },
+  (t) => [
+    // States no work change writes (work/state.ts), refused so a bug cannot store one.
+    check('tasks_withdrawn_dropped', sql`not ${t.withdrawn} or ${t.status} = 'dropped'`)
+  ]
+);
 
 export const reports = pgTable('reports', {
   id: id(),
@@ -592,7 +654,9 @@ export const ledger = pgTable(
     taskId: integer().references(() => tasks.id),
     runId: integer(),
     createdAt: created(),
-    embedding: vector({ dimensions: 768 })
+    embedding: vector({ dimensions: 768 }),
+    /** Which model made `embedding` (`EMBED_MODEL`). Null for a vector from before the office ran its own. */
+    embeddingModel: text()
   },
   (t) => [
     index('ledger_embedding').using('hnsw', t.embedding.op('vector_cosine_ops')),
@@ -766,65 +830,50 @@ export type ThreadStatus = 'open' | 'done' | 'failed' | 'stopped';
  * `hand_off` opens it, with that Odd as the hub; only the hub's runs hand off
  * again, so it stays hub and spoke, and threads never nest.
  */
-export const threads = pgTable('threads', {
-  id: id(),
-  /** What the work is for: the request, with any later steps or conditions. Every hub run on it sees this. */
-  title: text().notNull(),
-  goalId: integer().references(() => goals.id),
-  hubId: text()
-    .notNull()
-    .references(() => staff.id),
-  /** Who has it now. */
-  holderId: text()
-    .notNull()
-    .references(() => staff.id),
-  status: text().$type<ThreadStatus>().notNull().default('open'),
-  /** In this round of work, up to `HAND_OFF_LIMIT` (threads.ts). Every round's are its `hand_off` follow-ups. */
-  handOffsUsed: integer().notNull().default(0),
-  /** When the hub picks it back up, set by the hub. The office clock wakes it. */
-  resumeAt: at('resume_at'),
-  /**
-   * The `window` ask that holds this thread's hand-offs (usage-window.ts). Its
-   * `resumeAt` is then the window's reset, and the owner's yes wakes it sooner.
-   */
-  heldBy: integer().references(() => asks.id),
-  /** The task whose end wakes this thread (`wakeOnTask`). Never set alongside `resumeAt`. */
-  resumeOnTask: integer().references(() => tasks.id),
-  /**
-   * The key of each run that put work here from outside the thread: a hand-off,
-   * held or not, or a goal's plan (`keepRun` in threads.ts).
-   * While one of them goes (`runsGoing` in office-follow-ups.ts), the hub's pick-ups here
-   * wait, so the hub runs once at a time on its thread.
-   */
-  runs: text().array().notNull().default([]),
-  createdAt: created(),
-  endedAt: at('ended_at')
-});
+export const threads = pgTable(
+  'threads',
+  {
+    id: id(),
+    /** What the work is for: the request, with any later steps or conditions. Every hub run on it sees this. */
+    title: text().notNull(),
+    goalId: integer().references(() => goals.id),
+    hubId: text()
+      .notNull()
+      .references(() => staff.id),
+    /** Who has it now. */
+    holderId: text()
+      .notNull()
+      .references(() => staff.id),
+    status: text().$type<ThreadStatus>().notNull().default('open'),
+    /** In this round of work, up to `HAND_OFF_LIMIT` (threads.ts). Every round's are its `hand_off` follow-ups. */
+    handOffsUsed: integer().notNull().default(0),
+    /** When the hub picks it back up, set by the hub. The office clock wakes it. */
+    resumeAt: at('resume_at'),
+    /**
+     * The `window` ask that holds this thread's hand-offs (`handedOff` in work/hand-offs.ts). Its
+     * `resumeAt` is then the window's reset, and the owner's yes wakes it sooner.
+     */
+    heldBy: integer().references(() => asks.id),
+    /** The task whose end wakes this thread (`wakeParked` in work/answers.ts). Never set alongside `resumeAt`. */
+    resumeOnTask: integer().references(() => tasks.id),
+    /**
+     * The key of each run that put work here from outside the thread: a hand-off,
+     * held or not, or a goal's plan (`keepRun` in work/hand-offs.ts, `raisedOn` in work/threads.ts).
+     * While one of them goes (`runsGoing` in office-follow-ups.ts), the hub's pick-ups here
+     * wait, so the hub runs once at a time on its thread.
+     */
+    runs: text().array().notNull().default([]),
+    createdAt: created(),
+    endedAt: at('ended_at')
+  },
+  (t) => [
+    // States no work change writes (work/state.ts), refused so a bug cannot store one.
+    check('threads_one_park', sql`num_nonnulls(${t.resumeAt}, ${t.resumeOnTask}) <= 1`),
+    check('threads_held_has_time', sql`${t.heldBy} is null or ${t.resumeAt} is not null`)
+  ]
+);
 
-/**
- * Work a staffer owes after the owner answers it: carry out an approved ask, rework
- * one the owner sent back, take in the reason for a no, act on their feedback on a report, pick up the work
- * that waited on a task the staffer gave them, or plan a goal the owner set. A
- * new hire with a job gets started without being asked by its `first_day`. A `hand_off` is
- * work a colleague handed it, and `handed_back` brings the result home. A
- * `resume` picks a thread back up for its hub: at the time the hub set, or with
- * the owner's answer when no other run follows it. An `edited` run reads the
- * owner's edit to one of the staffer's files, for a lesson.
- */
-export const FOLLOW_UP_KINDS = [
-  'carry_out',
-  'rework',
-  'denied',
-  'feedback',
-  'task_done',
-  'goal',
-  'first_day',
-  'hand_off',
-  'handed_back',
-  'resume',
-  'edited'
-] as const;
-export type FollowUpKind = (typeof FOLLOW_UP_KINDS)[number];
+export { FOLLOW_UP_KINDS, type FollowUpKind } from './work/kinds.ts';
 /** `waiting` means the staffer put what it needs on the owner's desk. */
 export type Outcome = 'done' | 'failed' | 'waiting';
 
@@ -886,53 +935,61 @@ export type InChat = { staffId: string; card: ChatCard };
 export const chatCardOf = (staffId: string, chat?: InChat): ChatCard | undefined =>
   chat?.staffId === staffId ? chat.card : undefined;
 
-export const followUps = pgTable('follow_ups', {
-  id: id(),
-  staffId: text()
-    .notNull()
-    .references(() => staff.id),
-  kind: text().$type<FollowUpKind>().notNull(),
-  askId: integer().references(() => asks.id),
-  reportId: integer().references(() => reports.id),
-  taskId: integer().references(() => tasks.id),
-  /** A new goal for the Office Manager to plan. */
-  goalId: integer().references(() => goals.id),
-  /** Work a colleague handed this staffer, or the result of work it handed one. */
-  handOff: jsonb().$type<HandOff>(),
-  /** The thread this run works on, either side (threads.ts). */
-  threadId: integer().references(() => threads.id),
-  /** On an `edited` follow-up, the file the owner edited. */
-  edit: jsonb().$type<FileEdit>(),
-  /** The owner's words: their reason, what to change, their feedback, or their note on a task. */
-  note: text(),
-  /**
-   * On a `task_done` or `carry_out` follow-up, the titles of other work parked on the task,
-   * which picked up on its own as the task ended, so this run leaves it alone.
-   * Office text, never the owner's words: it stays out of `note`.
-   */
-  pickedUp: text().array(),
-  /**
-   * The task the thread was parked on when this run's claim ended the park
-   * (`startFollowUp`). Kept so a run that fails can give the wait back
-   * (`finishFollowUp`): only a run that ends without failing, or the wait's own end, ends it.
-   */
-  unparkedTask: integer().references(() => tasks.id),
-  /**
-   * The time the thread was parked until when this run's claim ended the park,
-   * kept for the same give-back. Never a usage-window hold's reset, which the claim leaves.
-   */
-  unparkedAt: at('unparked_at'),
-  /** The owner ticked "Report when done": success goes on their desk too. A failure always does. */
-  reportWhenDone: boolean().notNull().default(false),
-  /** The owner answered in this Odd's chat, on this card: the run's reply goes there too. Null from the Desk. */
-  chatCard: jsonb().$type<ChatCard>(),
-  createdAt: created(),
-  startedAt: at('started_at'),
-  outcome: text().$type<Outcome>(),
-  /** What the staffer said it did. */
-  result: text(),
-  doneAt: at('done_at')
-});
+export const followUps = pgTable(
+  'follow_ups',
+  {
+    id: id(),
+    staffId: text()
+      .notNull()
+      .references(() => staff.id),
+    kind: text().$type<FollowUpKind>().notNull(),
+    askId: integer().references(() => asks.id),
+    reportId: integer().references(() => reports.id),
+    taskId: integer().references(() => tasks.id),
+    /** A new goal for the Office Manager to plan. */
+    goalId: integer().references(() => goals.id),
+    /** Work a colleague handed this staffer, or the result of work it handed one. */
+    handOff: jsonb().$type<HandOff>(),
+    /** The thread this run works on, either side (threads.ts). */
+    threadId: integer().references(() => threads.id),
+    /** On an `edited` follow-up, the file the owner edited. */
+    edit: jsonb().$type<FileEdit>(),
+    /** The owner's words: their reason, what to change, their answer, or their note on a task. */
+    note: text(),
+    /**
+     * On a `task_done` or `carry_out` follow-up, the titles of other work parked on the task,
+     * which picked up on its own as the task ended, so this run leaves it alone.
+     * Office text, never the owner's words: it stays out of `note`.
+     */
+    pickedUp: text().array(),
+    /**
+     * The task the thread was parked on when this run's claim ended the park
+     * (`startFollowUp`). Kept so a run that fails can give the wait back
+     * (`finishFollowUp`): only a run that ends without failing, or the wait's own end, ends it.
+     */
+    unparkedTask: integer().references(() => tasks.id),
+    /**
+     * The time the thread was parked until when this run's claim ended the park,
+     * kept for the same give-back. Never a usage-window hold's reset, which the claim leaves.
+     */
+    unparkedAt: at('unparked_at'),
+    /** The owner ticked "Report when done": success goes on their desk too. A failure always does. */
+    reportWhenDone: boolean().notNull().default(false),
+    /** The owner answered in this Odd's chat, on this card: the run's reply goes there too. Null from the Desk. */
+    chatCard: jsonb().$type<ChatCard>(),
+    createdAt: created(),
+    startedAt: at('started_at'),
+    outcome: text().$type<Outcome>(),
+    /** What the staffer said it did. */
+    result: text(),
+    doneAt: at('done_at')
+  },
+  (t) => [
+    // States no work change writes (work/state.ts), refused so a bug cannot store one.
+    check('follow_ups_ended_together', sql`(${t.outcome} is null) = (${t.doneAt} is null)`),
+    check('follow_ups_one_unpark', sql`num_nonnulls(${t.unparkedTask}, ${t.unparkedAt}) <= 1`)
+  ]
+);
 
 export type RunStatus = 'running' | 'done' | 'failed';
 /** Why a run started: its schedule came due, or the owner pressed Run now. */
@@ -1026,6 +1083,11 @@ export const owner = pgTable('owner', {
    * Project sessions, which run outside Oddboro's limits, exist only while it is on.
    */
   advancedAt: at('advanced_at'),
+  /**
+   * When the owner passed the Act check (act-check.ts). Null until then, and
+   * while null nothing puts an Odd at Act (`changeLevel`, `hire`).
+   */
+  actCheckAt: at('act_check_at'),
   updatedAt: at('updated_at').notNull().defaultNow()
 });
 

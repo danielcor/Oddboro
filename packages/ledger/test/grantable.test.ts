@@ -33,6 +33,7 @@ const heldBack: Capabilities = {
   level: 'draft',
   remit: '',
   office: [],
+  actsOnHandOffs: false,
   agent: 'claude',
   own: { ...bare, granted: [] },
   outside: [
@@ -124,7 +125,7 @@ const HEARD: Record<GrantKind, (say: Say) => void> = {
   },
   office_tools: (say) => {
     const lacks =
-      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, say which and why in your reply.';
+      'Sam grants other office tools in your Settings tab, under Office; when a job needs one, ask for it with ask_for_office_tool.';
     assert.equal(G.OWNER_GRANTS.office_tools.missing({ owner: 'Sam', where }), lacks);
     assert.ok(say.accessInRun(heldBack, 'Sam', {}).split('\n').includes(lacks));
     // One office tool still not given is enough to hear it.
@@ -146,9 +147,11 @@ const HEARD: Record<GrantKind, (say: Say) => void> = {
     assert.equal(said([]), '');
   },
   level: (say) => {
-    const yours = 'Sam sets your level on your Settings tab, under Model.';
+    // The Odd itself asks for its level; another Odd reading about it (office_report)
+    // cannot ask for it, so it is told where the owner sets it.
+    const yours = 'When a job needs a higher level, ask Sam for it with ask_for_level.';
     const rowans = "Sam sets Rowan's level on Rowan's Settings tab, under Model.";
-    assert.equal(G.OWNER_GRANTS.level.missing({ owner: 'Sam', whose: 'your' }), yours);
+    assert.equal(G.OWNER_GRANTS.level.missing({ owner: 'Sam' }), yours);
     assert.equal(G.OWNER_GRANTS.level.missing({ owner: 'Sam', whose: "Rowan's" }), rowans);
     assert.ok(say.outsideLines(heldBack, 'Sam')[0].endsWith(` ${yours}`));
     assert.ok(say.outsideLines(heldBack, 'Sam', 'Rowan')[0].endsWith(` ${rowans}`));
@@ -156,7 +159,7 @@ const HEARD: Record<GrantKind, (say: Say) => void> = {
     // At its level the grant loads, and no route is said.
     const holds = { ...heldBack, level: 'act' as const };
     holds.outside = [{ ...heldBack.outside[0], heldBack: undefined }];
-    assert.doesNotMatch(say.outsideLines(holds, 'Sam')[0], /sets your level/);
+    assert.doesNotMatch(say.outsideLines(holds, 'Sam')[0], /ask_for_level/);
   }
 };
 
@@ -192,15 +195,19 @@ test('every staff PATCH key is the control of the grant it is classed as, a run 
 test('a grant the owner gives through an ask says what approving it does, from the desk answers', () => {
   for (const kind of G.GRANT_KINDS) {
     const g = G.OWNER_GRANTS[kind];
-    assert.equal('ask' in g.route, 'approving' in g, kind);
+    const { route } = g;
+    assert.equal('ask' in route, 'approving' in g, kind);
+    if (!('ask' in route)) continue;
+    // What the grant says approving does is the desk's own cell for that ask.
+    const approve = OWNER_ANSWERS.ask[route.ask].approve;
+    assert.equal(g.approving, 'then' in approve ? approve.then : approve, kind);
   }
-  // A grant an Odd can ask for says how, and what the yes does.
-  for (const kind of ['commands', 'web'] as const) {
-    assert.deepEqual(G.OWNER_GRANTS[kind].route, { ask: 'switch' }, kind);
-    assert.equal(G.OWNER_GRANTS[kind].approving, OWNER_ANSWERS.ask.switch.approve, kind);
-  }
+  // A grant an Odd can ask for says how.
+  assert.deepEqual(G.OWNER_GRANTS.commands.route, { ask: 'switch' });
+  assert.deepEqual(G.OWNER_GRANTS.web.route, { ask: 'switch' });
   assert.deepEqual(G.OWNER_GRANTS.folders.route, { ask: 'folder' });
-  assert.equal(G.OWNER_GRANTS.folders.approving, OWNER_ANSWERS.ask.folder.approve.then);
+  assert.deepEqual(G.OWNER_GRANTS.level.route, { ask: 'level' });
+  assert.deepEqual(G.OWNER_GRANTS.office_tools.route, { ask: 'office_tool' });
 });
 
 test('a hire with nothing picked starts from every one of HIRE_DEFAULTS, and a manager from its own: Draft, with exactly its tools', async () => {

@@ -1,8 +1,9 @@
 // Every owner route that changes something is declared in OWNER_ACTIONS, each
 // that says it records writes exactly one ledger row of its kind, and each
 // that says it may record writes only the kinds it lists, in every state its
-// driver tries, and some in at least one. Of the rows that write none, only
-// those in CHANGES are driven.
+// driver tries, and some in at least one. A row that writes none is driven too
+// (CHANGES, QUIET), or UNDRIVEN says why it cannot be, so no row goes unchecked
+// by default.
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -304,6 +305,11 @@ const TRY: Record<Recording, (send: Send) => Promise<void>> = {
       await send({ params: { id: String(id) }, body: { path, level: 'read' } });
     }),
   'PUT /api/files': (send) => send({ body: fileOf('plan.md') }),
+  // After the welcome, which keeps the owner's row: the right answers, the first time.
+  'POST /api/act-check': async (send) => {
+    await L.setOwnerName(await L.ownerName());
+    await send({ body: { answers: [true, true, false] } });
+  },
   // After the welcome, which keeps the owner's row; the name stays as it was.
   'PUT /api/setup/advanced': async (send) => {
     await L.setOwnerName(await L.ownerName());
@@ -432,6 +438,11 @@ const TRY: Record<Recording, (send: Send) => Promise<void>> = {
     send({ params: { id: 'sam' }, body: { model: L.MODELS.claude[0].id } }),
   'PATCH /api/staff/[id]#account': async (send) =>
     send({ params: { id: 'cleo' }, body: { account: await accountOf('Shared') } }),
+  // An Odd of its own at Act, since only one at Act shows the choice.
+  'PATCH /api/staff/[id]#actsOnHandOffs': async (send) => {
+    await L.pg`insert into staff ${L.pg({ ...odd('ada', 'Ada'), permission: 'act' })}`;
+    await send({ params: { id: 'ada' }, body: { actsOnHandOffs: true } });
+  },
   // A tool already connected: one not yet connected puts its connect steps on
   // the desk instead, and the owner finishing them is the row (POST /api/tasks/[id]#finish).
   'POST /api/staff/[id]/access': async (send) => {
@@ -461,6 +472,15 @@ const TRY: Record<Recording, (send: Send) => Promise<void>> = {
     await send({ params: { id: 'lead' }, query: { connector: p.id } });
     assert.ok(await woke(thread), 'the work parked on the connect task did not wake');
   },
+  'PUT /api/staff/[id]/skills': (send) =>
+    send({
+      params: { id: 'sam' },
+      body: {
+        name: 'invoices',
+        was: null,
+        skill: { description: 'Use for invoices.', text: 'Review the invoice total.' }
+      }
+    }),
   'PUT /api/staff/[id]/description': async (send) =>
     send({
       params: { id: 'sam' },
@@ -585,12 +605,27 @@ async function tableDigests(): Promise<Map<string, string>> {
 const taskOf = async (title: string, step: string | Step) =>
   String((await L.giveTask('lead', { title, why: 'w', steps: [step] })).id);
 
+type Key = keyof typeof OWNER_ACTIONS;
+
+/** A waiting poke for Sam, by its id as the route takes it. */
+const pokeOf = async (message: string) =>
+  String((await L.schedulePoke('sam', new Date(Date.now() + 3_600_000), message)).id);
+/** A daily job for Sam, by its id. */
+const jobOf = async (name: string) =>
+  (
+    await L.addJob({
+      staffId: 'sam',
+      name,
+      instructions: 'Check the post.',
+      schedule: { every: 'day', at: '09:00' }
+    })
+  ).id;
+
 /**
  * Actions that write no ledger row but change a row of the office's: any
- * rows each needs, then its call. Only these are driven, so another route that
- * writes and is classed `notAnAction` passes unseen.
+ * rows each needs, then its call.
  */
-const CHANGES: Partial<Record<keyof typeof OWNER_ACTIONS, (send: Send) => Promise<void>>> = {
+const CHANGES: Partial<Record<Key, (send: Send) => Promise<void>>> = {
   'POST /api/staff/[id]/pokes': async (send) => {
     await L.pg`insert into pokes (staff_id, at, message, status)
       values ('sam', now(), 'How did the call go?', 'sent')`;
@@ -619,26 +654,170 @@ const CHANGES: Partial<Record<keyof typeof OWNER_ACTIONS, (send: Send) => Promis
     await L.pg`insert into staff ${L.pg(odd('sol', 'Sol'))}`;
     await L.pg`update staff set package = ${JSON.stringify(persona)}::jsonb where id = 'sol'`;
     await send({});
-  }
+  },
+  'DELETE /api/pokes/[id]': async (send) => send({ params: { id: await pokeOf('Cancel me.') } }),
+  'POST /api/pokes/[id]': async (send) => send({ params: { id: await pokeOf('Say it now.') } }),
+  // Paused, then gone: a run would start Sam's tool.
+  'POST /api/jobs/[id]': async (send) => {
+    const id = String(await jobOf('Post'));
+    await send({ params: { id }, body: { op: 'update', enabled: false } });
+    await send({ params: { id }, body: { op: 'delete' } });
+  },
+  'POST /api/staff/[id]/jobs': (send) =>
+    send({
+      params: { id: 'sam' },
+      body: {
+        name: 'Bins',
+        instructions: 'Put the bins out.',
+        schedule: { every: 'day', at: '19:00' }
+      }
+    }),
+  'DELETE /api/jobs/away': async (send) => {
+    await L.pg`update jobs set skipped_at = now() where id = ${await jobOf('Missed')}`;
+    await send({});
+  },
+  'POST /api/reports/[id]': async (send) => {
+    await L.addReport('sam', 'The week', 'All quiet.');
+    const [r] = await L.pg<{ id: number }[]>`select max(id)::int as id from reports`;
+    await send({ params: { id: String(r.id) } });
+  },
+  'PUT /api/switches': async (send) => {
+    const light = (await currentOffice()).world.lights[0];
+    assert.ok(light, 'the office has no lamp to switch');
+    await send({ body: { obj: light.obj, on: false } });
+  },
+  // Rio, whom the persona rows added.
+  'DELETE /api/personas/[slug]': (send) => send({ params: { slug: 'rio' } })
 };
 
-test("marking pokes read, the update window, setup, working a task's steps and signing out of New Altitude each change a row of the office and write no ledger row, and none is classed as changing nothing", async (t) => {
+/**
+ * Actions that change none of the office's records: any rows each needs, then
+ * its call, which must leave every table as it was.
+ */
+const QUIET: Partial<Record<Key, (send: Send) => Promise<void>>> = {
+  'POST /api/account': (send) => send({}),
+  'POST /api/client-log': (send) => send({ body: { kind: 'boot', message: '/ in a test' } }),
+  'PUT /api/diagnostics': (send) => send({ body: { answer: 'no' } }),
+  'DELETE /api/weather': (send) => send({}),
+  'POST /api/files/resolve': (send) =>
+    send({ body: { files: [{ staff: 'sam', path: 'plan.md' }] } }),
+  'POST /api/staff/[id]/description': (send) =>
+    send({ params: { id: 'sam' }, body: { servers: [] } }),
+  'POST /api/looks/parts': (send) => send({ body: { look: L.MANAGERS.find((m) => m.look)!.look } }),
+  // The owner's page has no run's token, so the gateway turns it away.
+  'POST /api/gateway/[connector]': (send) => send({ params: { connector: 'gmail' } }),
+  'DELETE /api/gateway/[connector]': (send) => send({ params: { connector: 'gmail' } })
+};
+
+const AI = "Starts an Odd's AI tool or an outside service, which this office cannot run.";
+const AWS = 'Signs in to AWS, or reads from it, which this office cannot reach.';
+/** Rows no driver reaches, and why. A new row needs a driver or a reason here. */
+const UNDRIVEN: Partial<Record<Key, string>> = {
+  'PUT /api/agents': 'Installs or signs in an AI tool on this computer.',
+  'POST /api/agents/[tool]': 'Installs or signs in an AI tool on this computer.',
+  'PUT /api/agents/[tool]': 'Installs or signs in an AI tool on this computer.',
+  'DELETE /api/agents/[tool]': 'Removes an AI tool from this computer.',
+  'POST /api/diagnostics/envelope':
+    'A test office has no report address, so it drops the envelope and changes nothing; no driver is written yet.',
+  'POST /api/files/open': 'Opens the system browser.',
+  'POST /api/folders/pick': "Opens the system's folder picker.",
+  'PUT /api/weather': "Downloads a country's postal codes from GeoNames.",
+  'POST /api/looks': AI,
+  'POST /api/office/design': AI,
+  'POST /api/staff/draft': AI,
+  'POST /api/staff/[id]/chat': AI,
+  'PATCH /api/staff/[id]/chat': 'Adds to a reply while it runs, and none runs here.',
+  'DELETE /api/staff/[id]/chat': 'Stops a reply while it runs, and none runs here.',
+  'POST /api/staff/[id]/bug-reports': "Files on GitHub with the owner's own GitHub CLI.",
+  'POST /api/staff/[id]/attachments':
+    "Takes the file's bytes with its name in a header, which `request` cannot send; it keeps the file on disk, in no table.",
+  'POST /api/project-sessions': 'Talks to a native terminal session over its socket.',
+  'POST /api/services/[id]': 'Opens a connect task for an AWS tool.',
+  'POST /api/setup/address': "Sets up the office's address with Caddy on port 80.",
+  'PUT /api/setup/claude': 'Installs or signs in Claude Code.',
+  'POST /api/setup/claude': 'Installs or signs in Claude Code.',
+  'DELETE /api/setup/claude': 'Signs Claude Code out.',
+  'POST /api/setup/notify': 'Shows a system notification.',
+  'POST /api/setup/search': "Downloads the search model from Oddboro's GitHub release.",
+  'POST /api/backup':
+    "Removes a file in the office's home and touches no table; no driver is written yet.",
+  'POST /api/backup/restore':
+    'Takes a backup file as its body and restarts the office, which `request` cannot send or survive.',
+  'POST /api/browser-link':
+    "Only the app's shell, with its key in a header, asks for one, and `request` sends no headers.",
+  'POST /api/update':
+    "Only the app's shell, with its token, reports an update; an install needs one reported.",
+  'GET /connect/callback': "Finishes a hosted server's sign-in, which needs one started with it.",
+  'POST /api/tasks/[id]#start-response':
+    'Needs a task with a reference file and a response set up; no driver is written yet.',
+  'POST /api/tasks/[id]#response':
+    'Needs a task with a reference file and a response set up; no driver is written yet.',
+  'POST /api/tasks/[id]#oauth': "Starts a hosted server's sign-in.",
+  'POST /api/tasks/[id]#secret': "Keeps the owner's key in the system's secret store.",
+  'POST /api/tasks/[id]#tools': 'Asks the server for its tools.',
+  'POST /api/tasks/[id]#confirm-tools': 'Needs the tools the server listed.',
+  'POST /api/tasks/[id]#postal-inboxes': 'Reads the mailboxes a LegalZoom sign-in reaches.',
+  'POST /api/tasks/[id]#postal-select': 'Needs the mailboxes a LegalZoom sign-in reached.',
+  'POST /api/tasks/[id]#aws-current': AWS,
+  'POST /api/tasks/[id]#aws-sign-in': AWS,
+  'POST /api/tasks/[id]#aws-roles': AWS,
+  'POST /api/tasks/[id]#aws-choose': AWS,
+  'POST /api/tasks/[id]#aws-secrets-connected': AWS,
+  'POST /api/tasks/[id]#aws-secret-names': AWS,
+  'POST /api/tasks/[id]#aws-secret-keys': AWS,
+  'POST /api/tasks/[id]#aws-secret': AWS
+};
+
+/** The tables each call changed, in the order the driver sent them. A refused call still counts. */
+async function tablesChanged(key: string, act: (send: Send) => Promise<void>): Promise<string[][]> {
+  const [method, at] = key.split(' ');
+  const changed: string[][] = [];
+  await act(async (call) => {
+    const before = await tableDigests();
+    try {
+      await reach(at.split('#')[0], method, call);
+    } finally {
+      const after = await tableDigests();
+      changed.push([...after.keys()].filter((k) => after.get(k) !== before.get(k)));
+    }
+  });
+  assert.notEqual(changed.length, 0, `${key}'s driver never called the route`);
+  return changed;
+}
+
+test('each row that writes no ledger row but changes the office changes a table and writes no ledger row, in every call its driver sends', async (t) => {
   for (const [key, act] of Object.entries(CHANGES)) {
     await t.test(key, async () => {
-      const [method, at] = key.split(' ');
-      let changed: string[] = [];
-      await act(async (call) => {
-        const before = await tableDigests();
-        await reach(at.split('#')[0], method, call);
-        const after = await tableDigests();
-        changed = [...after.keys()].filter((k) => after.get(k) !== before.get(k));
-      });
-      assert.notDeepEqual(changed, [], `${key} changed no table`);
-      assert.ok(!changed.includes('ledger'), `${key} wrote a ledger row, and is classed as none`);
-      assert.ok(
-        !('notAnAction' in OWNER_ACTIONS[key as keyof typeof OWNER_ACTIONS]),
-        `${key} changed ${changed.join(', ')}, yet is classed as changing none of the office's records`
-      );
+      for (const changed of await tablesChanged(key, act)) {
+        assert.notDeepEqual(changed, [], `${key} changed no table`);
+        assert.ok(!changed.includes('ledger'), `${key} wrote a ledger row, and is classed as none`);
+        assert.ok(
+          !('notAnAction' in OWNER_ACTIONS[key as Key]),
+          `${key} changed ${changed.join(', ')}, yet is classed as changing none of the office's records`
+        );
+      }
     });
   }
+});
+
+test('each row classed as changing nothing leaves every table as it was', async (t) => {
+  for (const [key, act] of Object.entries(QUIET)) {
+    await t.test(key, async () => {
+      assert.ok('notAnAction' in OWNER_ACTIONS[key as Key], `${key} is not classed notAnAction`);
+      for (const changed of await tablesChanged(key, act))
+        assert.deepEqual(
+          changed,
+          [],
+          `${key} changed ${changed.join(', ')}, yet is classed as changing none of the office's records`
+        );
+    });
+  }
+});
+
+test('every owner row is driven, or says why it cannot be', () => {
+  const driven = new Set([...Object.keys(TRY), ...Object.keys(CHANGES), ...Object.keys(QUIET)]);
+  const unaccounted = Object.keys(OWNER_ACTIONS).filter((k) => !driven.has(k) && !(k in UNDRIVEN));
+  assert.deepEqual(unaccounted, [], 'these rows have no driver and no reason in UNDRIVEN');
+  const both = Object.keys(UNDRIVEN).filter((k) => driven.has(k));
+  assert.deepEqual(both, [], 'these rows are driven, so UNDRIVEN should not list them');
 });

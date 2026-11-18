@@ -1,6 +1,14 @@
 // Tools for an Odd's own work: its jobs, goals, lessons and description.
 import { z } from 'zod';
-import { editOwnJob, jobsFor, raiseAsk, setDescription, record, roster } from './office.ts';
+import {
+  DescriptionChanged,
+  editOwnJob,
+  jobsFor,
+  raiseAsk,
+  setDescription,
+  record,
+  roster
+} from './office.ts';
 import { allGoals, goal, goalDraft, goalsFor, logProgress, updateGoal } from './goals.ts';
 import { GOAL_IS_LIVE } from './goal-words.ts';
 import {
@@ -251,7 +259,7 @@ if (has('propose_goal_plan'))
 tool(
   'keep_lesson',
   {
-    description: `Remember a correction from ${OWNER}, so they never give it twice. Call it once when they correct your work or say how they want something done from now on, in chat, in a reason on an ask, or in feedback on a report: "too long", "always copy Sam", "never book before 9". It works only in a chat, a run carrying ${OWNER}'s note on an ask or a task, or a run reading their edit to one of your files; in any other run it refuses, so tell them in your reply instead. Not for an instruction about this one piece of work only. ${OWNER} sees it in your chat as "I'll remember: ..." with Undo, so do not repeat it to them. It goes live in every later run at once when they said it; a lesson you inferred waits for their Keep.`,
+    description: `Remember a correction from ${OWNER}, so they never give it twice. Call it once when they correct your work or say how they want something done from now on, in chat, or in their answer to something you raised: "too long", "always copy Sam", "never book before 9". It works only in a chat, a run carrying ${OWNER}'s note on an ask or a task, or a run reading their edit to one of your files; in any other run it refuses, so tell them in your reply instead. Not for an instruction about this one piece of work only. ${OWNER} sees it in your chat as "I'll remember: ..." with Undo, so do not repeat it to them. It goes live in every later run at once when they said it; a lesson you inferred waits for their Keep.`,
     inputSchema: {
       lesson: z
         .string()
@@ -417,6 +425,13 @@ if (has('edit_my_job'))
     }
   );
 
+/**
+ * The job description this run last read: the one it began with, then each
+ * one it saved or was shown. A save from it stops if the text changed since,
+ * so the Odd never overwrites a newer edit by the owner.
+ */
+let myDescription = me.desk;
+
 if (has('edit_my_description'))
   tool(
     'edit_my_description',
@@ -430,10 +445,23 @@ if (has('edit_my_description'))
     async ({ description, approved_ask }) => {
       const go = await goAhead(approved_ask);
       if ('problem' in go) return text(go.problem);
-      return text(
-        (await setDescription(ME, description, { go }))
-          ? 'Your job description is changed. It applies from your next run.'
-          : 'That is your job description already. Nothing changed.'
-      );
+      try {
+        const changed = await setDescription(ME, description, { go, was: myDescription });
+        myDescription = description.trim();
+        return text(
+          changed
+            ? 'Your job description is changed. It applies from your next run.'
+            : 'That is your job description already. Nothing changed.'
+        );
+      } catch (e) {
+        if (!(e instanceof DescriptionChanged)) throw e;
+        myDescription = e.current;
+        return {
+          ...text(
+            `Nothing changed. Your job description changed since this run began, so your edit would undo the newer one. Here it is now:\n\n${e.current}\n\nMake your change on this text and pass the whole of it again.`
+          ),
+          isError: true
+        };
+      }
     }
   );

@@ -9,6 +9,7 @@
   import { call } from './api.ts';
   import { ago, nextWhen } from './format.ts';
   import type { StaffProfile } from '../staff/roster.ts';
+  import { jobRunning, runWords, type OddNow } from '../staff/odd-now.ts';
 
   // An Odd's jobs, on its info page: each with its schedule, its last run and
   // its next ("Next run today at 3:00 PM", or Paused). Clicking a job opens it
@@ -18,9 +19,11 @@
     profile: StaffProfile;
     /** Bumps when jobs or runs change, so the list reloads. */
     version: number;
-    working: string | undefined;
+    now: OddNow;
   };
-  let { profile, version, working }: Props = $props();
+  let { profile, version, now }: Props = $props();
+  /** Its job runs going, in words. A hand-off, a follow-up or a draft is not a job. */
+  const running = $derived(runWords({ ...now, runs: now.runs.filter((w) => w.kind === 'job') }));
 
   let jobs = $state<Job[]>([]);
   /** The job being edited, 'new' for one being added, or nothing. */
@@ -77,6 +80,31 @@
     if (j?.files) void act(() => check(j.id));
   }
 
+  // A new job can start as a review of a folder this Odd still gets: one it
+  // was given that is on the disk and holds no keys (`reach.granted`). The pick
+  // fills the name and steps, which the owner can edit; it never overwrites
+  // what the owner typed, so it stays in place but turns off once they type.
+  const reviewable = $derived(
+    profile.folders.filter((f) => profile.reach.granted.some((g) => g.path === f.path))
+  );
+  let filled = $state({ name: '', instructions: '' });
+  const untouched = $derived(
+    (!name && !instructions) || (name === filled.name && instructions === filled.instructions)
+  );
+
+  function reviewFolder(path: string) {
+    if (!path || !untouched) return;
+    name = 'Review ' + (path.split(/[\\/]/).filter(Boolean).at(-1) || path);
+    instructions = [
+      `1. Read the files in ${path}.`,
+      '2. List each issue you find, with the file it is in.',
+      '3. Leave out issues from your last review that are still waiting on me.',
+      '4. Put the list on my desk.'
+    ].join('\n');
+    report = true;
+    filled = { name, instructions };
+  }
+
   async function save() {
     await act(async () => {
       if (editing === 'new')
@@ -113,13 +141,26 @@
     {/if}
   </div>
   <p class="mt-0.5 text-[11px] text-muted">
-    {working
-      ? `Running ${working} now.`
+    {running
+      ? `Running ${running} now.`
       : `What it does on its own, and how often, in ${zoneName()}.`}
   </p>
   <div class="mt-2">
     {#snippet form()}
       <div class="flex flex-col gap-2 rounded-xl bg-raise p-3">
+        {#if editing === 'new' && reviewable.length}
+          <select
+            aria-label="Start a review of a folder"
+            class="rounded-lg bg-night/60 px-3 py-2 text-sm text-ink outline-none disabled:opacity-50"
+            disabled={!untouched}
+            onchange={(e) => reviewFolder(e.currentTarget.value)}
+          >
+            <option value="">Start a review of a folder…</option>
+            {#each reviewable as folder (folder.path)}
+              <option value={folder.path}>{folder.shown}</option>
+            {/each}
+          </select>
+        {/if}
         <input
           class="rounded-lg bg-night/60 px-3 py-2 text-sm outline-none placeholder:text-faint"
           placeholder="Name, e.g. Sort personal mail"
@@ -246,7 +287,7 @@
                     : ''}
                 </span>
               </span>
-              {#if working === j.name}
+              {#if jobRunning(now, j.name)}
                 <span class="rounded-full bg-moss/20 px-2 py-0.5 text-[11px] text-moss"
                   >Running</span
                 >
@@ -275,7 +316,7 @@
             <div class="mt-2 flex gap-1.5">
               <button
                 class="rounded-lg bg-night/60 px-2.5 py-1 text-xs hover:bg-sea/25 disabled:opacity-40"
-                disabled={!!working}
+                disabled={now.runs.length > 0}
                 onclick={() => act(() => call(`/api/jobs/${j.id}`, { op: 'run' }))}>Run now</button
               >
               <button

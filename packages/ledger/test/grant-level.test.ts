@@ -7,8 +7,6 @@ import { and, eq } from 'drizzle-orm';
 import { connectors, grants, ledger, staff, tasks } from '../src/schema.ts';
 import { db } from './pglite.ts';
 
-// The ledger rows embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const { setGrantLevel } = await import('../src/office.ts');
 
 const odd = (id: string, name: string, permission: 'read' | 'draft' | 'act') => ({

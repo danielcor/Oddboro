@@ -26,8 +26,6 @@ import type { ThreadFor } from '../src/threads.ts';
 import { db, sql } from './pglite.ts';
 import { oneThreadPerGoal } from './one-thread.ts';
 
-// The ledger rows a finished run writes embed nothing: no Ollama answers here.
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 const G = await import('../src/goals.ts');
 const H = await import('../src/hand-offs.ts');
 const O = await import('../src/office.ts');
@@ -36,7 +34,6 @@ const B = await import('../src/lead-brief.ts');
 const W = await import('../src/goal-work.ts');
 const { MANAGER_ROLE } = await import('../src/managers.ts');
 
-const OWNER = 'Sam';
 const odd = (name: string, role: string) => ({
   name,
   role,
@@ -216,7 +213,6 @@ test("what the owner tells a colleague in chat about the goal wakes the lead, an
   const r = await T.tellLead({
     staffId: hired.Priya,
     threadId: goalThread,
-    owner: OWNER,
     said,
     words: 'use the Game of Life glider for the spin.',
     reading: 'They want the spin to use the glider.'
@@ -425,11 +421,11 @@ test("after the owner stops the goal's thread, only a new plan opens it again: n
   assert.equal((await threadRow(goalThread)).status, 'stopped');
   assert.match(
     B.workLedBrief(await B.ledStories('marshall', 'chat')),
-    /^Where it stands: \{owner\} stopped it, so it cannot be continued\.$/m,
-    "the lead's chat says the owner stopped the goal's work"
+    /^Where it stands: it has stopped, so it cannot be continued\.$/m,
+    "the lead's chat says the goal's work has stopped"
   );
   assert.match(
-    (await T.notLed({ hubId: 'marshall', threadId: goalThread, owner: OWNER })) ?? '',
+    (await T.notLed({ hubId: 'marshall', threadId: goalThread })) ?? '',
     /stopped/,
     'the lead may not name a stopped thread from a chat'
   );

@@ -41,7 +41,7 @@ if (HANDS_OFF.tool) {
   /** Each colleague's line, with the tools of this Odd's it lacks. */
   const lines = colleagues.map((c) => {
     const lacks = lacking(held, c.id, [ME]);
-    return `- ${c.id}: ${c.name}, ${c.role}. ${c.remit}${lacks.length ? ` Lacks ${toolNames(lacks.map(yours))}.` : ''}${c.package ? ' Their replies come from New Altitude, so what you hand them leaves this computer.' : ''}`;
+    return `- ${c.id}: ${c.name}, ${c.role}. ${c.remit}${lacks.length ? ` Lacks ${toolNames(lacks.map(yours))}.` : ''}${c.package ? ' Their replies come from New Altitude, so what you hand them leaves this computer.' : ''}${c.permission === 'act' && c.actsOnHandOffs ? ` ${OWNER} lets them act on their own on work you hand them.` : ''}`;
   });
   tool(
     'hand_off',
@@ -55,7 +55,7 @@ if (HANDS_OFF.tool) {
         `Write the brief for them: what to do, why, and what to send back. Give them everything they need and nothing more: pass on details about ${OWNER}'s family, or anything from a goal they do not serve, only when their job covers it.`,
         `Describe the work and the result you need, never which tools to use: each colleague may run on another coding tool, with tools of its own.`,
         `Never copy anything from a tool the colleague lacks (the list below says which of yours) into the brief or the folder without ${OWNER}'s yes. If the work needs it, raise_ask first, naming the tool and what goes to whom, and hand off once they say yes.`,
-        `Their run works at Draft at most and cannot hand on, so they can prepare, research and draft, but anything outward goes to ${OWNER} as an ask. Your pick-up works at Draft at most too.`,
+        `Their run works at Draft at most and cannot hand on, so they can prepare, research and draft, but anything outward goes to ${OWNER} as an ask. The list says who ${OWNER} lets act on their own on work you hand them instead. Your pick-up works at Draft at most too.`,
         colleagues.length ? `Your colleagues:\n${lines.join('\n')}` : 'You have no colleagues yet.'
       ].join('\n\n'),
       inputSchema: {
@@ -224,7 +224,6 @@ if (workingOn.length)
       const r = await tellLead({
         staffId: ME,
         threadId: work,
-        owner: OWNER,
         // `inChat` offers it only where the office sets OWNER_SAID. With none,
         // no words match, so tellLead refuses and nothing reaches the lead.
         said: OWNER_SAID ?? '',

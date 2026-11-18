@@ -1,3 +1,14 @@
+exports[`answered keeps the words its run receives 1`] = `
+[
+  "{owner} answered something you raised:",
+  "",
+  "- Their words",
+  "",
+  "1. If it changes what you should do, do it now.",
+  "2. Otherwise say so, and stop."
+]
+`;
+
 exports[`carry_out keeps the words its run receives 1`] = `
 [
   "{owner} approved your ask #7. Carry it out now.",
@@ -29,30 +40,9 @@ exports[`denied keeps the words its run receives 1`] = `
 
 exports[`edited keeps the words its run receives 1`] = `
 [
-  "{owner} read your report \\"Weekly\\" and gave feedback. Work out what it means, then act on it.",
+  "{owner} gave feedback. Work out what it means, then act on it.",
   "",
   "- Their feedback: Their words",
-  "",
-  "The report:",
-  "",
-  "All well",
-  "",
-  "1. Work inside the office that they asked for, such as notes or a file in your folder, do now.",
-  "2. Anything that changes one of your jobs, or something outside the office unless you hold Act and use a tool {owner} connected for you at read and write: raise_ask first, one exact action per ask.",
-  "3. Anything only they can do goes on their desk with give_owner_a_task.",
-  "4. If the feedback needs nothing done, say so."
-]
-`;
-
-exports[`feedback keeps the words its run receives 1`] = `
-[
-  "{owner} read your report \\"Weekly\\" and gave feedback. Work out what it means, then act on it.",
-  "",
-  "- Their feedback: Their words",
-  "",
-  "The report:",
-  "",
-  "All well",
   "",
   "1. Work inside the office that they asked for, such as notes or a file in your folder, do now.",
   "2. Anything that changes one of your jobs, or something outside the office unless you hold Act and use a tool {owner} connected for you at read and write: raise_ask first, one exact action per ask.",
@@ -66,10 +56,11 @@ exports[`first_day keeps the words its run receives 1`] = `
   "You joined the office today, and you just said hello to {owner} in chat. Get started now, so they never have to ask.",
   "",
   "1. Read your job description, notes/intake.md if you have one, my_goals and my_jobs.",
-  "2. If you cannot do good work without answers from {owner}, put only the questions your intake did not answer in the response of give_owner_a_task, then stop.",
-  "3. If a tool you need is not in my_access, ask for it with ask_for_access. For Run commands or Browse the web, ask with ask_for_switch when my_access says {owner} can switch it on.",
-  "4. Otherwise do the first piece of real work your job calls for, now: the first run of your job, or the first thing your job description says to do, so {owner} sees it today. Work for a goal you serve is not yours to start: the Odd who leads it hands you each piece.",
-  "5. Your reply goes on their desk. Write it to {owner}: what you did, and what comes next."
+  "2. Check what the office already knows about your job: search relevant Ledger entries when you have access, and read relevant work already shared with you. For anything still missing, check the colleagues listed in your prompt. If one can help and you can hand off, give them the work and finish this run. Their answer brings you back.",
+  "3. Give {owner} a task only for what still needs them after that check. A decision or preference only {owner} can make goes to {owner}, never to a colleague. Ask only the questions your intake and the office could not answer. Say why no colleague can do it, then stop.",
+  "4. If a tool you need is not in my_access, ask for it with ask_for_access. For Run commands or Browse the web, ask with ask_for_switch when my_access says {owner} can switch it on.",
+  "5. Otherwise do the first piece of real work your job calls for, now: the first run of your job, or the first thing your job description says to do, so {owner} sees it today. Work for a goal you serve is not yours to start: the Odd who leads it hands you each piece.",
+  "6. Your reply goes on their desk. Write it to {owner}: what you did, and what comes next."
 ]
 `;
 
@@ -81,7 +72,7 @@ exports[`goal keeps the words its run receives 1`] = `
   "- When: Ongoing. Area: work.",
   "",
   "1. Read the office: office_report for each Odd, what it does, its level and the tools it holds or is waiting on, and list_goals for the goals they already serve.",
-  "2. Work out who does what, how often, and with which tools (find_connectors). Give the work to Odds already here when one fits, with a new job or a change to one. Give a part to an Odd whose level and tools cover it. For a tool an Odd lacks, put any level raise in owner_steps, as a step on that Odd's Settings tab, under Model. Have the Odd ask for the tool itself with ask_for_access when its officeTools include it, or put connecting it in owner_steps when they do not. For Run commands or Browse the web, never put switching it on in owner_steps: the Odd asks for it itself with ask_for_switch when its part needs it, and office_report says whether {owner} can switch it on for that Odd. Keep every other step only {owner} can do in owner_steps too. Hire only for work nobody here fits.",
+  "2. Work out who does what, how often, and with which tools (find_connectors). Give the work to Odds already here when one fits, with a new job or a change to one. Give a part to an Odd whose level and tools cover it. Never put a level raise or an office tool in owner_steps: the Odd asks for it itself with ask_for_level or ask_for_office_tool when its part needs it. For an outside tool an Odd lacks, have the Odd ask for it itself with ask_for_access when its officeTools include it, or put connecting it in owner_steps when they do not. For Run commands or Browse the web, never put switching it on in owner_steps: the Odd asks for it itself with ask_for_switch when its part needs it, and office_report says whether {owner} can switch it on for that Odd. Keep every other step only {owner} can do in owner_steps too. Hire only for work nobody here fits.",
   "3. Read the brief and any answers already given. If a missing answer changes the plan, put only those questions in the response of give_owner_a_task, then stop. You pick up when they finish it.",
   "4. Otherwise bring the whole plan in one ask with propose_goal_plan. Write each hire's job description to a file first, and pass any intake as its intake_file.",
   "5. Once {owner} approves the plan, you pick up here on the goal and lead the work: you hand each piece to the Odd who does it. So its owner steps hold only what truly needs {owner}, such as signing in to a tool, never passing work or a request to an Odd.",
@@ -91,13 +82,9 @@ exports[`goal keeps the words its run receives 1`] = `
 
 exports[`hand_off keeps the words its run receives 1`] = `
 [
-  "{owner} read your report \\"Weekly\\" and gave feedback. Work out what it means, then act on it.",
+  "{owner} gave feedback. Work out what it means, then act on it.",
   "",
   "- Their feedback: Their words",
-  "",
-  "The report:",
-  "",
-  "All well",
   "",
   "1. Work inside the office that they asked for, such as notes or a file in your folder, do now.",
   "2. Anything that changes one of your jobs, or something outside the office unless you hold Act and use a tool {owner} connected for you at read and write: raise_ask first, one exact action per ask.",
@@ -108,13 +95,9 @@ exports[`hand_off keeps the words its run receives 1`] = `
 
 exports[`handed_back keeps the words its run receives 1`] = `
 [
-  "{owner} read your report \\"Weekly\\" and gave feedback. Work out what it means, then act on it.",
+  "{owner} gave feedback. Work out what it means, then act on it.",
   "",
   "- Their feedback: Their words",
-  "",
-  "The report:",
-  "",
-  "All well",
   "",
   "1. Work inside the office that they asked for, such as notes or a file in your folder, do now.",
   "2. Anything that changes one of your jobs, or something outside the office unless you hold Act and use a tool {owner} connected for you at read and write: raise_ask first, one exact action per ask.",
@@ -141,7 +124,7 @@ exports[`rework keeps the words its run receives 1`] = `
   "- What they want changed: Their words",
   "",
   "1. Do any work the new version needs first, such as rewriting a file in your folder.",
-  "2. Raise the new version with the same tool as before (raise_ask, propose_reply, propose_filter, propose_hire, ask_for_access, ask_for_folder, ask_for_switch, propose_goal or propose_goal_plan), or the one their note calls for, passing revises: 7.",
+  "2. Raise the new version with the same tool as before (raise_ask, propose_reply, propose_filter, propose_hire, ask_for_access, ask_for_folder, ask_for_switch, ask_for_level, ask_for_office_tool, propose_goal or propose_goal_plan), or the one their note calls for, passing revises: 7.",
   "3. Do not carry out the ask itself. They decide the new version."
 ]
 `;

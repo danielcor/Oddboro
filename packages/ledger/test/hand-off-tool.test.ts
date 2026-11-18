@@ -1,6 +1,6 @@
 // The hand_off tool as a run sees it: the office tool server (src/mcp.ts) in a
 // process of its own, as the office starts one for each run, over the office's
-// own database (local-db.ts) in a throwaway folder on a free port. It checks
+// own database (local-db.ts) in a throwaway folder. It checks
 // what only the tool server decides: which runs are offered hand_off, that a
 // hand-off or a goal's plan carries the run's key to its thread, that a
 // hand-off that hands nothing on comes back as an error and one held for the
@@ -85,7 +85,7 @@ const said = (r: Awaited<ReturnType<Client['callTool']>>) =>
 // after a top-level await.
 
 // A goal's thread, led by Mo, that Pia (no job) and Jo (a job) serve.
-const { asks, followUps, jobs, staffGoals, tasks } = await import('../src/schema.ts');
+const { asks, followUps, jobs, staffGoals, staffSkills, tasks } = await import('../src/schema.ts');
 await db
   .insert(staff)
   .values([
@@ -675,6 +675,10 @@ test('every office tool refuses a key it does not take, and says which keys it d
   await db.insert(staffGoals).values({ staffId: 'all', goalId: fair.id, part: 'Everything' });
   // Gmail at any level offers propose_reply, and at write ask_for_standing_yes.
   await db.insert(grants).values({ staffId: 'all', connectorId: 'gmail', level: 'act' });
+  // A skill the owner attached offers read_skill.
+  await db
+    .insert(staffSkills)
+    .values({ staffId: 'all', name: 'every', description: 'Use always.', text: 'Do it.' });
   // A native conversation shared with Ada offers the project tools, in Advanced
   // mode. The owner row keeps the name every other test here reads.
   await db
@@ -750,7 +754,7 @@ for (const [id, holds] of Object.entries(HOLDERS))
 // The test above works out what a run gets with `isOffered`, so a condition
 // dropped from a row, or from `isOffered`, changes what it expects too. These
 // hold the rows themselves, and what `isOffered` gives for each condition.
-test('only leave_office, withdraw, tell_lead, draft_bug_report, remove_odd and bring_back_odd wait for a chat, only leave_office is kept from the manager, and only see_office shapes the prompt and is never offered, even to a chat holding it', () => {
+test('only leave_office, withdraw, tell_lead, draft_bug_report, oddboro_update, remove_odd and bring_back_odd wait for a chat, only leave_office is kept from the manager, and only see_office shapes the prompt and is never offered, even to a chat holding it', () => {
   const where = (field: 'inChat' | 'notToManager' | 'prompt') =>
     OFFICE_TOOLS.filter((t) => t[field]).map((t) => t.id);
   assert.deepEqual(where('inChat'), [
@@ -758,6 +762,7 @@ test('only leave_office, withdraw, tell_lead, draft_bug_report, remove_odd and b
     'withdraw',
     'tell_lead',
     'draft_bug_report',
+    'oddboro_update',
     'remove_odd',
     'bring_back_odd'
   ]);
@@ -1460,7 +1465,16 @@ test("resume_at after_task parks on another work's open task, and refuses one do
     (
       await db
         .insert(tasks)
-        .values({ staffId: 'tess', title, why: 'w', steps: [], threadId, status })
+        // A done task has its time, as the office ends one.
+        .values({
+          staffId: 'tess',
+          title,
+          why: 'w',
+          steps: [],
+          threadId,
+          status,
+          doneAt: status === 'done' ? new Date() : null
+        })
         .returning()
     )[0];
   const open = await task('Proof the menu', other.id);

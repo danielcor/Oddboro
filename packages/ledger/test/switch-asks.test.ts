@@ -153,3 +153,40 @@ test('Deny leaves the switches off', async () => {
   assert.equal((await me()).commands, false);
   assert.equal((await row(a.id)).status, 'denied');
 });
+
+test(
+  "a switch ask's yes and the Settings tab turn Run commands on alike, and both refuse a tool that never runs them, changing nothing",
+  { skip: NO_SWITCH_ON_WINDOWS },
+  async () => {
+    await db.insert(staff).values({
+      id: 'tate',
+      name: 'Tate',
+      role: 'Builder',
+      remit: 'Tests.',
+      variant: 'a',
+      portrait: 'a',
+      permission: 'draft',
+      agent: 'codex',
+      desk: 'You are Tate.'
+    });
+    const tate = async () => (await db.select().from(staff).where(eq(staff.id, 'tate')))[0];
+    // Sage by its ask, Tate on the Settings tab.
+    const a = await raise(['commands']);
+    await O.decideAsk(a.id, 'approve', null);
+    assert.equal(await O.setOwnTool('tate', 'commands', true), undefined);
+    const switches = (s: { commands: boolean; web: boolean }) => [s.commands, s.web];
+    assert.deepEqual(switches(await me()), switches(await tate()));
+    assert.deepEqual(switches(await me()), [true, false]);
+    const titles = (await db.select().from(ledger)).map((l) => l.title.replace(/Sage|Tate/, 'X'));
+    assert.deepEqual(titles, ['Let X run commands', 'Let X run commands']);
+
+    await db.update(staff).set({ commands: false, agent: 'grok' });
+    await sql`delete from ledger`;
+    const b = await raise(['commands']);
+    await assert.rejects(O.decideAsk(b.id, 'approve', null), /cannot run commands here/);
+    const refused = await O.setOwnTool('tate', 'commands', true);
+    assert.ok(refused && 'refused' in refused, JSON.stringify(refused));
+    assert.deepEqual([(await me()).commands, (await tate()).commands], [false, false]);
+    assert.deepEqual(await db.select().from(ledger), []);
+  }
+);

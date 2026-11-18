@@ -5,6 +5,7 @@
 // for db.ts (pglite.ts). Run with `npm test -w @oddboro/ledger`.
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -17,14 +18,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { and, eq } from 'drizzle-orm';
-import { connectors, followUps, grants, staff, threads } from '../src/schema.ts';
+import { connectors, followUps, goals, grants, staff, staffGoals, threads } from '../src/schema.ts';
 import { db } from './pglite.ts';
 
 // Loaded once db.ts is this database, so every query they make lands here.
 const { handOff } = await import('../src/hand-offs.ts');
 const { raiseAsk } = await import('../src/office.ts');
-const { exchangeForLead, tellLead, threadFolder, threadPart, threadsOn, threadsOnBrief } =
+const { exchangeForLead, notLed, tellLead, threadFolder, threadPart, threadsOn, threadsOnBrief } =
   await import('../src/threads.ts');
+const { setOwnerName } = await import('../src/office-usage.ts');
+// The lead's note names the owner as the office does, by the name they gave.
+await setOwnerName('Sam');
 
 const odd = (id: string, name: string) => ({
   id,
@@ -55,7 +59,7 @@ const ownThread = await onThread('bram', 'rex', 'Bram leads this one');
 const said = 'Thanks Bram. On the presets: make the colours warmer.\nAlso, lunch at one?';
 const reading = 'Sam wants the presets in warmer colours.';
 const tell = (staffId: string, threadId: number, words = 'make the colours warmer.') =>
-  tellLead({ staffId, threadId, owner: 'Sam', said, words, reading });
+  tellLead({ staffId, threadId, said, words, reading });
 const resumes = (id: number) =>
   db
     .select()
@@ -90,7 +94,6 @@ test("tell_lead writes one resume for the lead, with the owner's words, the coll
   const r = await tellLead({
     staffId: 'bram',
     threadId: presets,
-    owner: 'Sam',
     said,
     words: 'make the colours warmer.',
     reading: 'Sam wants the presets\nin warmer colours.',
@@ -111,7 +114,6 @@ test('a tell_lead with no reading is refused', async () => {
   const r = await tellLead({
     staffId: 'bram',
     threadId: quiet,
-    owner: 'Sam',
     said,
     words: 'make the colours warmer.',
     reading: ' \n '
@@ -143,15 +145,40 @@ test('tell_lead on a thread the Odd is not on is refused', async () => {
   assert.ok('problem' in r && r.problem.includes('is not work you are on'), JSON.stringify(r));
 });
 
-test('tell_lead on a thread the owner stopped is refused', async () => {
+test('tell_lead on a thread the owner stopped is refused, and copies no file the owner attached', async () => {
   const stopped = await onThread('cole', 'bram', 'Stopped work');
   await db
     .update(threads)
     .set({ status: 'stopped', endedAt: new Date() })
     .where(eq(threads.id, stopped));
-  const r = await tell('bram', stopped);
+  const r = await tellLead({
+    staffId: 'bram',
+    threadId: stopped,
+    said,
+    words: 'make the colours warmer.',
+    reading,
+    files: { carry: [attached('swatch.png', 'png')], unfit: [] }
+  });
   assert.ok('problem' in r && r.problem.includes('stopped'), JSON.stringify(r));
   assert.equal((await resumes(stopped)).length, 0);
+  assert.equal(existsSync(threadPart(stopped, 'bram')), false, 'a file was copied');
+});
+
+test("a goal's Odd never handed a piece of its work tells the lead by its own name", async () => {
+  await db.insert(staff).values(odd('zed', 'Zed'));
+  const [goal] = await db.insert(goals).values({ title: 'A warmer sim' }).returning();
+  // Zed serves the goal and is handed nothing, so only its serving puts it on the work.
+  await db.insert(staffGoals).values({ staffId: 'zed', goalId: goal.id, part: 'The colours' });
+  const r = await handOff({
+    from: 'cole',
+    to: 'bram',
+    work: { title: 'Draw the presets', brief: 'Draw two presets.' },
+    thread: { title: 'A warmer sim', goalId: goal.id }
+  });
+  assert.ok('id' in r, JSON.stringify(r));
+  assert.deepEqual(await tell('zed', r.thread), { lead: 'Cole' });
+  const [wake] = await resumes(r.thread);
+  assert.ok(wake.note?.startsWith('Zed passed you what Sam told them'), wake.note ?? '');
 });
 
 test("a colleague's chat says the work waits on the owner while an ask raised on it is open", async () => {
@@ -174,7 +201,6 @@ const fromGil = async (lead: string, title: string, exchange?: string) => {
   const r = await tellLead({
     staffId: 'gil',
     threadId: id,
-    owner: 'Sam',
     said,
     words: 'make the colours warmer.',
     reading,
@@ -250,7 +276,6 @@ test("a file the owner attached lands in the colleague's part once, and told aga
     const r = await tellLead({
       staffId: 'rex',
       threadId: work,
-      owner: 'Sam',
       said,
       words: 'make the colours warmer.',
       reading,
@@ -280,7 +305,6 @@ test("a file that cannot land never holds back the owner's words: the lead is to
   const r = await tellLead({
     staffId: 'rex',
     threadId: work,
-    owner: 'Sam',
     said,
     words: 'make the colours warmer.',
     reading,
@@ -312,7 +336,6 @@ test("a file the owner attached lands under the next free name when a different 
     tellLead({
       staffId: 'rex',
       threadId: work,
-      owner: 'Sam',
       said,
       words: 'make the colours warmer.',
       reading,
@@ -344,4 +367,101 @@ test("a file the owner attached lands under the next free name when a different 
       ),
     wake.note ?? ''
   );
+});
+
+test("a file the office could not copy is named in the lead's note as not come, and the words still go", async () => {
+  const work = await onThread('cole', 'rex', 'Presets on a full disk');
+  // A file where the work's folder goes, so the copy fails on the disk itself.
+  mkdirSync(join(threadFolder(work), '..'), { recursive: true });
+  writeFileSync(threadFolder(work), 'not a folder');
+  after(() => rmSync(threadFolder(work), { force: true }));
+  const r = await tellLead({
+    staffId: 'rex',
+    threadId: work,
+    said,
+    words: 'make the colours warmer.',
+    reading,
+    files: { carry: [attached('swatch.png', 'png')], unfit: [] }
+  });
+  assert.deepEqual(r, {
+    lead: 'Cole',
+    files: [{ named: 'swatch.png', why: 'the office could not copy it' }]
+  });
+  const [wake] = await resumes(work);
+  assert.ok(
+    wake.note?.endsWith(
+      `One file Sam attached did not come: swatch.png, since the office could not copy it.`
+    ),
+    wake.note ?? ''
+  );
+});
+
+test("a removal landing while tell_lead passes the owner's words waits for it, so 'Passed to' always means the lead's pick-up holds the words", async (t) => {
+  await db.insert(staff).values([odd('ivy', 'Ivy'), odd('kit', 'Kit')]);
+  const work = await onThread('ivy', 'kit', 'Work its lead leaves');
+  const sharing = await import('../src/sharing.ts');
+  const { removeOdd } = await import('../src/leaving.ts');
+  let removal: Promise<unknown> | undefined;
+  t.mock.module(new URL('../src/sharing.ts', import.meta.url).href, {
+    namedExports: {
+      ...sharing,
+      // tell_lead reads the tools under its locks, before its checks and the note. The
+      // removal starts here and gets a quarter second to land: where the
+      // checks and the note are separate steps it lands in that time, and the
+      // lead it removed never gets the note; here it waits for the note's
+      // transaction, so the time runs out and the note goes first.
+      heldTools: async (...a: Parameters<typeof sharing.heldTools>) => {
+        removal = removeOdd('ivy');
+        await Promise.race([removal, new Promise((done) => setTimeout(done, 250))]);
+        return sharing.heldTools(...a);
+      }
+    }
+  });
+  // A copy that imports the sharing above, so its tellLead calls it.
+  // The query loads a fresh copy of the module, whose type is the module's own.
+  const fresh = '../src/threads.ts?removal';
+  const { tellLead: telling } = (await import(fresh)) as typeof import('../src/threads.ts');
+  const r = await telling({
+    staffId: 'kit',
+    threadId: work,
+    said,
+    words: 'make the colours warmer.',
+    reading,
+    exchange: 'Sam: make the colours warmer.\nKit: I will pass it on.'
+  });
+  assert.ok(removal, 'the tools were never read');
+  assert.equal(await removal, undefined, 'the removal was refused');
+  assert.ok('lead' in r, JSON.stringify(r));
+  const notes = (await resumes(work)).filter((f) => f.staffId === 'ivy').map((f) => f.note ?? '');
+  assert.ok(
+    notes.some((n) => n.includes("Sam's words: make the colours warmer.")),
+    `tellLead returned ${JSON.stringify(r)}, and the lead's pick-ups hold ${JSON.stringify(notes)}`
+  );
+});
+
+test("tell_lead on work its lead's leaving stopped says the work stopped, never that the owner stopped it", async () => {
+  await db.insert(staff).values([odd('uma', 'Uma'), odd('vic', 'Vic')]);
+  const work = await onThread('uma', 'vic', 'Work whose lead leaves');
+  const { removeOdd } = await import('../src/leaving.ts');
+  await removeOdd('uma');
+  assert.equal((await db.select().from(threads).where(eq(threads.id, work)))[0]?.status, 'stopped');
+  const r = await tell('vic', work);
+  assert.deepEqual(r, {
+    problem: `Work ${work} has stopped, so nothing more runs on it. Tell Sam so.`
+  });
+  assert.doesNotMatch(r.problem, /stopped it|stopped work/);
+});
+
+test('a hub naming its own stopped work for an ask hears the work stopped, never that the owner stopped it', async () => {
+  const work = await onThread('cole', 'bram', 'Stopped work a hub names');
+  await db
+    .update(threads)
+    .set({ status: 'stopped', endedAt: new Date() })
+    .where(eq(threads.id, work));
+  const problem = await notLed({ hubId: 'cole', threadId: work });
+  assert.equal(
+    problem,
+    `Work ${work} has stopped, so nothing more goes on it. Name another, or null.`
+  );
+  assert.doesNotMatch(problem ?? '', /stopped it|stopped work/);
 });

@@ -1,6 +1,7 @@
 // What a run's office tool server (mcp.ts in the ledger) is told about the run,
 // through its environment. The tool server trusts only these, never a tool
 // argument, so each one here is a rule the run is held to.
+import type { ChatUpdateStatus } from '@oddboro/ledger';
 
 /** What `officeEnv` needs to know about one run. */
 export type RunFacts = {
@@ -8,6 +9,8 @@ export type RunFacts = {
   key: string;
   /** The owner's own message, when this is a chat. */
   ownerSaid?: string;
+  /** The updater's status when this owner chat starts. No app key or release notes. */
+  update?: ChatUpdateStatus;
   /** In a chat, the last exchange before the owner's message, which `tell_lead` passes on. */
   chatExchange?: string;
   /**
@@ -32,6 +35,8 @@ export type RunFacts = {
   threadId?: number;
   /** On a lead's pick-up of a colleague's result, that colleague: what the run puts on the desk names them. */
   via?: string;
+  /** A colleague's words reach the run: it serves a hand-off, or picks up a result. */
+  fromColleague?: boolean;
   /** A run that only reads the owner's reason or edit for a lesson: it hands nothing on. */
   lessonRun: boolean;
   /** The office holds the network, after a Claude Code refused the open one (`networkHeld`), whatever this run's own tool or switches. */
@@ -58,6 +63,7 @@ export function officeEnv(r: RunFacts): Record<string, string> {
   return {
     RUN_KEY: r.key,
     ...(r.ownerSaid ? { OWNER_SAID: words(r.ownerSaid) } : {}),
+    ...(r.ownerSaid && r.update ? { ODDBORO_UPDATE_STATUS: JSON.stringify(r.update) } : {}),
     ...(r.chatExchange ? { CHAT_EXCHANGE: words(r.chatExchange) } : {}),
     // Whole, never cut: a list cut short would read as none.
     ...(r.ownerFiles?.length ? { OWNER_FILES: JSON.stringify(r.ownerFiles) } : {}),
@@ -70,6 +76,8 @@ export function officeEnv(r: RunFacts): Record<string, string> {
     ...(r.handOffId ? { HAND_OFF_ID: String(r.handOffId) } : {}),
     ...(r.threadId ? { THREAD_ID: String(r.threadId) } : {}),
     ...(r.via ? { VIA: r.via } : {}),
+    // my_access then leaves out the standing yeses the run does not have (`handedOver`).
+    ...(r.fromColleague ? { FROM_COLLEAGUE: '1' } : {}),
     ...(r.lessonRun ? { LESSON_RUN: '1' } : {}),
     // On every run while held, so my_access and office_report apply the hold
     // to each Odd they speak of, as the office's own readers do (`heldReach`).

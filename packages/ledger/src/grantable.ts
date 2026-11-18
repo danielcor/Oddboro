@@ -23,7 +23,8 @@ export const STAFF_PATCH_KEYS = [
   'accept',
   'effort',
   'model',
-  'account'
+  'account',
+  'actsOnHandOffs'
 ] as const;
 export type StaffPatchKey = (typeof STAFF_PATCH_KEYS)[number];
 
@@ -54,7 +55,9 @@ export type Readers = {
   office_tools: { owner: string; where: string };
   // house() knows no tool and no owner's name, so it never offers a switch.
   outside_tools: { has: (tool: string) => boolean };
-  level: { owner: string; whose: string };
+  // `whose` is the card another Odd reads about (office_report). With none, the
+  // Odd reads its own line, which asks for the level.
+  level: { owner: string; whose?: string };
 };
 
 /** A function in `capabilities.ts` or the office's `house.ts` that says a grant's missing line. */
@@ -154,9 +157,10 @@ export const OWNER_GRANTS = {
     control: { patch: ['tool', 'on'] },
     // Said while any office tool the owner can give is still not given.
     missing: ({ owner, where }: Readers['office_tools']) =>
-      `${owner} grants other office tools in ${where}; when a job needs one, say which and why in your reply.`,
+      `${owner} grants other office tools in ${where}; when a job needs one, ask for it with ask_for_office_tool.`,
     heard: ['accessInRun'],
-    route: { owner: 'settings' },
+    route: { ask: 'office_tool' },
+    approving: OWNER_ANSWERS.ask.office_tool.approve,
     atHire: HIRE_DEFAULTS.staff.tools.some(isGrantable)
   },
   outside_tools: {
@@ -176,9 +180,13 @@ export const OWNER_GRANTS = {
   },
   level: {
     control: { patch: ['permission'] },
-    missing: ({ owner, whose }: Readers['level']) => levelRoute(owner, whose),
+    missing: ({ owner, whose }: Readers['level']) =>
+      whose
+        ? levelRoute(owner, whose)
+        : `When a job needs a higher level, ask ${owner} for it with ask_for_level.`,
     heard: ['outsideLines', 'askAboveLevel'],
-    route: { owner: 'settings' },
+    route: { ask: 'level' },
+    approving: OWNER_ANSWERS.ask.level.approve,
     // Every Odd holds a level; a hire's is `HIRE_DEFAULTS.staff.permission`.
     atHire: true
   }
@@ -200,5 +208,6 @@ export const PATCH_KEY: Record<StaffPatchKey, GrantKind | 'run setting' | 'quali
   accept: 'qualifier',
   effort: 'run setting',
   model: 'run setting',
-  account: 'run setting'
+  account: 'run setting',
+  actsOnHandOffs: 'run setting'
 };

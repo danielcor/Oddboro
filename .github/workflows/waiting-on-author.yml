@@ -1,0 +1,40 @@
+# Pull requests that wait on their author. A maintainer who asks the author
+# something labels the pull request `waiting-on-author` (CONTRIBUTING.md).
+# With no reply for 7 days it is labelled `stale` with a reminder, and 7 days
+# after that it closes. `keep-open` exempts one whose comment says what
+# happens instead. Issues are left alone. The author's reply moves it back to
+# `needs-review` (author-replied.yml).
+name: Waiting on author
+
+on:
+  schedule:
+    - cron: '17 15 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/stale@v9
+        with:
+          only-pr-labels: waiting-on-author
+          exempt-pr-labels: keep-open
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          days-before-pr-stale: 7
+          days-before-pr-close: 7
+          stale-pr-label: stale
+          remove-pr-stale-when-updated: true
+          stale-pr-message: >
+            We asked something here a week ago and have not heard back. If
+            there is no reply in 7 more days, this pull request closes. You
+            can reopen it any time.
+          close-pr-message: >
+            Closing this, since we have not heard back in two weeks. Thanks
+            for the work. Reopen it whenever you are ready, and we pick it up
+            again.

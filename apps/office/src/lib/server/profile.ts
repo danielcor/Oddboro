@@ -35,6 +35,7 @@ export function toProfile(r: StaffRow, guesses = 0): StaffProfile {
     portrait: r.portrait,
     hired: officeDay(new Date(r.hiredAt)),
     permission: r.permission,
+    actsOnHandOffs: r.actsOnHandOffs,
     agent: r.agent,
     ...(r.account ? { account: r.account } : {}),
     model: modelFor(r.agent, r.model),

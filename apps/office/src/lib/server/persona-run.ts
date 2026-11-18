@@ -58,8 +58,11 @@ function note(name: string, a: Unanswered): string {
       return `${name} has reached New Altitude's limit for now.${a.retryAfterSeconds === undefined ? '' : ` Try again in ${waitWords(a.retryAfterSeconds)}.`} ${found}`;
     case 'failed':
     case 'abandoned':
-    case 'interrupted':
       return `${name} could not answer just now. ${found}`;
+    case 'interrupted':
+      return [`${name} could not finish this answer.`, a.partialReply, found]
+        .filter(Boolean)
+        .join('\n\n');
     case 'refused_access':
       return `${QUIET_LINE.access(name)} ${found}`;
     case 'grant':

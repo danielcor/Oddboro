@@ -2,6 +2,7 @@
 // Registry when there is a search.
 import { json } from '@sveltejs/kit';
 import { BUILT_IN, catalog, GOOGLE, POSTAL_ID, searchRegistry } from '@oddboro/ledger';
+import { knownTools } from '#lib/server/imported-servers.ts';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ url }) => {
@@ -36,9 +37,12 @@ export const GET: RequestHandler = async ({ url }) => {
   let problem: string | undefined;
   if (q)
     try {
-      registry = (await searchRegistry(q)).filter((c) => !own.some((o) => o.id === c.registry));
+      registry = (await searchRegistry(q)).filter(
+        (c) => !saved.some((o) => o.registry === c.registry || o.id === c.registry)
+      );
     } catch (e) {
       problem = e instanceof Error ? e.message : String(e);
     }
-  return json({ catalog: own, registry, problem });
+  // Every tool a name in an imported agent file can match, so the hire window sorts as the hire does.
+  return json({ catalog: own, registry, problem, known: await knownTools() });
 };

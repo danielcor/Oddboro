@@ -1,0 +1,27 @@
+# Evergreen sprigs around a hollow ring, tied with a rust ribbon.
+sprite winter-wreath
+size 16 18
+layer wall
+footprint 1 1
+origin 0 14
+tag wall decor place-wall
+
+frame default
+......kkkk......
+....kkvVV!kk....
+..kkVvvVVVV!kk..
+..kvRr!!kVVV!k..
+.kvv8!kk.kV!!kk.
+.kV!Vk....kVV!k.
+kvV!!k....k!rR!k
+kVvV!k....k!8!!k
+.kVV!k....kVV!k.
+.kVvVVk..kV!!!k.
+..kVrV!kkV!V!k..
+..kkV!V!!VV!!k..
+...krrRk8kRrk...
+...kRRRrRRR8k...
+....kkR88Rkk....
+.....kRkkRk.....
+....kR8k.k8k....
+....kkk..kkk....

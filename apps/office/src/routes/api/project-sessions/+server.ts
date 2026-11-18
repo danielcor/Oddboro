@@ -104,8 +104,9 @@ export const POST: RequestHandler = async ({ request }) => {
           !(await changeProjectRequest(
             a.key,
             a.id,
-            ['proposed'],
-            a.approve ? 'authorized' : 'stopped'
+            ['proposed', 'failed'],
+            a.approve ? 'authorized' : 'stopped',
+            { answer: '' }
           ))
         )
           throw new Error('That proposal is no longer waiting.');

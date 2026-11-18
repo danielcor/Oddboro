@@ -1,30 +1,100 @@
 // What differs between operating systems, in one place: where logs go, how a
-// page or a file opens, and how a login service runs. Each system gets
-// one entry in the tables below. A Mac uses launchd and ~/Library/Logs, Linux
-// a systemd user unit and the XDG state folder, and Windows a Task Scheduler
-// task and %LOCALAPPDATA%\Oddboro. Everything else in the office is the same
-// code on each.
-import { execFile, execFileSync, spawn } from 'node:child_process';
+// page or a file opens, how a login service runs, and the environment a host
+// program gets inside an AppImage. Each system gets one entry in the tables
+// below. A Mac uses launchd and ~/Library/Logs, Linux a systemd user unit and
+// the XDG state folder, and Windows a Task Scheduler task and
+// %LOCALAPPDATA%\Oddboro. Everything else in the office is the same code on
+// each.
+import { execFile, execFileSync, spawn, type ExecFileException } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 export type System = 'mac' | 'linux' | 'windows';
 
-/** The system the office runs on, or undefined for one it does not know. */
-export const SYSTEM: System | undefined = (
-  { darwin: 'mac', linux: 'linux', win32: 'windows' } as const
-)[process.platform as 'darwin' | 'linux' | 'win32'];
-export const MAC = SYSTEM === 'mac';
-export const LINUX = SYSTEM === 'linux';
-export const WINDOWS = SYSTEM === 'windows';
 /**
  * The system the office runs on, read at each call. Every other file asks this
  * instead of reading `process.platform` (scripts/check-platform.ts), so a test
- * that fakes the system reaches every reader. The constants above are fixed
+ * that fakes the system reaches every reader. The constants below are fixed
  * when this file loads.
  */
 export const currentPlatform = (): NodeJS.Platform => process.platform;
+
+const SYSTEMS: Partial<Record<NodeJS.Platform, System>> = {
+  darwin: 'mac',
+  linux: 'linux',
+  win32: 'windows'
+};
+/** The system the office runs on, read at each call, or undefined for one it does not know. */
+export const currentSystem = (): System | undefined => SYSTEMS[currentPlatform()];
+
+/** The system the office runs on, as it was when this file loaded. */
+export const SYSTEM = currentSystem();
+export const MAC = SYSTEM === 'mac';
+export const LINUX = SYSTEM === 'linux';
+export const WINDOWS = SYSTEM === 'windows';
+
+/**
+ * Names an AppImage runtime may have used to keep a variable from before it
+ * started. The long name is the usual one. The short name is the other
+ * spelling. The first that is set wins, and an empty value means it was unset.
+ */
+const SAVED_LIBRARY_PATH = ['APPIMAGE_ORIGINAL_LD_LIBRARY_PATH', 'APPIMAGE_ORIG_LD_LIBRARY_PATH'];
+const SAVED_PRELOAD = ['APPIMAGE_ORIGINAL_LD_PRELOAD', 'APPIMAGE_ORIG_LD_PRELOAD'];
+
+/**
+ * The environment for a program that ships with the computer, such as
+ * notify-send, xdg-open, secret-tool or zenity. Outside an AppImage this is
+ * `base` itself. Inside one, the runtime points LD_LIBRARY_PATH at the glib
+ * it bundled, which is older than the host's, so those programs fail to
+ * start. This puts back the values from before the AppImage started, or
+ * removes them, and takes the AppImage's own folders off PATH.
+ */
+export function hostEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (!base.APPIMAGE && !base.APPDIR) return base;
+  const env: NodeJS.ProcessEnv = { ...base };
+  restoreOrClear(env, 'LD_LIBRARY_PATH', SAVED_LIBRARY_PATH);
+  restoreOrClear(env, 'LD_PRELOAD', SAVED_PRELOAD);
+  if (base.APPDIR && env.PATH) env.PATH = withoutAppDir(env.PATH, base.APPDIR);
+  return env;
+}
+
+function restoreOrClear(
+  env: NodeJS.ProcessEnv,
+  key: 'LD_LIBRARY_PATH' | 'LD_PRELOAD',
+  names: readonly string[]
+) {
+  let found = false;
+  let value: string | undefined;
+  for (const name of names) {
+    if (!Object.hasOwn(env, name)) continue;
+    found = true;
+    value = env[name];
+    break;
+  }
+  if (found && value) env[key] = value;
+  else delete env[key];
+}
+
+/** A path without its trailing slashes. A loop, since a regex here is slow on a long run of them. */
+function trimSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path[end - 1] === '/') end--;
+  return path.slice(0, end);
+}
+
+/** PATH with every entry inside the AppImage mount taken out. */
+function withoutAppDir(path: string, appdir: string): string {
+  const root = trimSlashes(appdir);
+  if (!root) return path;
+  return path
+    .split(delimiter)
+    .filter((entry) => {
+      const dir = trimSlashes(entry);
+      return dir !== root && !dir.startsWith(`${root}/`);
+    })
+    .join(delimiter);
+}
 
 /**
  * Where the office's logs go. XDG_STATE_HOME wins wherever it is set;
@@ -44,8 +114,101 @@ export const OFFICE_LOG = join(
   MAC && !process.env.XDG_STATE_HOME ? 'oddboro-office.log' : 'office.log'
 );
 
-const run = (cmd: string, args: string[]) =>
-  new Promise<boolean>((done) => execFile(cmd, args, (e) => done(!e)));
+/**
+ * How a one-shot command came back. `missing` means it could not start: it is
+ * not there (ENOENT), may not run (EACCES), or is not a program this system
+ * can run (ENOEXEC). It carries no text, so no caller can show a raw error or
+ * take "not there" for an empty answer.
+ */
+export type Probe =
+  | { status: 'ok'; out: string; err: string }
+  | { status: 'failed'; code: number | null; out: string; err: string }
+  | { status: 'missing' }
+  | { status: 'timeout' };
+
+/**
+ * Run a command to its end and say how it went, with what it printed. No
+ * shell, and no time limit unless `timeout` (in ms) gives one. On Windows no
+ * window either, unless `showWindow`: some commands open a window the owner
+ * must see, such as the browser or a dialog asking them to confirm, and
+ * hiding the command can hide that window too. `input` goes to the command's
+ * stdin. stdin then closes, given input or not, so a command that reads to
+ * the end never waits.
+ * Text passed this way stays out of the process list. `killSignal` is what
+ * stops a command at its timeout, SIGTERM unless given: a command that
+ * ignores SIGTERM runs on, and its caller waits, until it ends by itself.
+ */
+export function probe(
+  cmd: string,
+  args: readonly string[],
+  o: {
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+    cwd?: string;
+    showWindow?: true;
+    input?: string;
+    maxBuffer?: number;
+    killSignal?: NodeJS.Signals;
+  } = {}
+): Promise<Probe> {
+  const { showWindow, input, ...options } = o;
+  return new Promise((done) => {
+    try {
+      const child = execFile(
+        cmd,
+        args,
+        {
+          ...options,
+          env: hostEnv(options.env ?? process.env),
+          encoding: 'utf8',
+          ...(showWindow ? {} : { windowsHide: true })
+        },
+        (e, out, err) => done(e ? ended(e, out, err) : { status: 'ok', out, err })
+      );
+      // stdin always closes, with or without input, so a command that reads
+      // it sees the end at once. execFile ignores a `stdio` option, so ending
+      // its pipe is the only way. A command can exit before it reads, such as
+      // one with no sign-in. The pipe then fails, and the callback above
+      // already says how it ended.
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(input);
+    } catch (e) {
+      // A file this system cannot run (ENOEXEC) throws here rather than in the
+      // callback. Anything else thrown here is a wrong argument, so it rejects.
+      if (!couldNotStart(e)) throw e;
+      done({ status: 'missing' });
+    }
+  });
+}
+
+/** Whether an error is the command failing to start, thrown or passed to the callback. */
+const couldNotStart = (e: unknown) =>
+  e instanceof Error && 'syscall' in e && String(e.syscall).startsWith('spawn');
+
+function ended(e: ExecFileException, out: string, err: string): Probe {
+  // execFile marks the error killed only when its own timer stopped the command.
+  if (e.killed) return { status: 'timeout' };
+  if (couldNotStart(e)) return { status: 'missing' };
+  return { status: 'failed', code: typeof e.code === 'number' ? e.code : null, out, err };
+}
+
+const run = async (cmd: string, args: string[]) => (await probe(cmd, args)).status === 'ok';
+
+/**
+ * Whether `pid` exited and waits for its parent to reap it, which
+ * `process.kill(pid, 0)` still finds. ps says so on a Mac and Linux. Windows
+ * has no ps and no such wait, so there it never does. False when ps fails.
+ */
+export function waitsToBeReaped(pid: number): boolean {
+  if (currentPlatform() === 'win32') return false;
+  try {
+    return execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' })
+      .trim()
+      .startsWith('Z');
+  } catch {
+    return false;
+  }
+}
 
 // Windows PowerShell 5.1 ships with every Windows, so the office reaches the
 // Credential Manager, toasts and Task Scheduler through it with nothing to
@@ -60,29 +223,37 @@ const psScript = (script: string) =>
 export function powershellSync(script: string, env: Record<string, string> = {}, input?: string) {
   return execFileSync('powershell.exe', [...POWERSHELL, '-Command', psScript(script)], {
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...hostEnv(), ...env },
     input,
     stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     windowsHide: true
   });
 }
 
-/** Run a PowerShell script: whether it succeeded, and what it printed. */
-export function powershell(
-  script: string,
-  env: Record<string, string> = {}
-): Promise<{ ok: boolean; out: string }> {
-  return new Promise((done) =>
-    execFile(
-      'powershell.exe',
-      [...POWERSHELL, '-Command', psScript(script)],
-      { env: { ...process.env, ...env }, windowsHide: true, timeout: 120_000 },
-      (e, out) => done({ ok: !e, out: String(out ?? '').trim() })
-    )
-  );
+/** Run a PowerShell script and say how it went, with what it printed. */
+export function powershell(script: string, env: Record<string, string> = {}): Promise<Probe> {
+  return probe('powershell.exe', [...POWERSHELL, '-Command', psScript(script)], {
+    env: { ...process.env, ...env },
+    timeout: 120_000
+  });
 }
-const ps = async (script: string, env: Record<string, string> = {}) =>
-  (await powershell(script, env)).ok;
+
+/** Whether a PowerShell script succeeded. */
+async function ps(script: string, env: Record<string, string> = {}): Promise<boolean> {
+  const r = await powershell(script, env);
+  switch (r.status) {
+    case 'ok':
+      return true;
+    case 'failed':
+    case 'missing':
+    case 'timeout':
+      return false;
+    default: {
+      const missed: never = r;
+      throw new Error(`PowerShell came back as ${JSON.stringify(missed)}`);
+    }
+  }
+}
 
 /**
  * Each system's opener: the program, then any words it needs before what it
@@ -97,9 +268,25 @@ const OPENER: Record<System, [string, ...string[]]> = {
 };
 const [OPEN, ...OPEN_WORDS] = OPENER[SYSTEM ?? 'linux'];
 
-/** Open a URL in the owner's browser, and say whether the opener took it. */
-export function openUrl(url: string): Promise<boolean> {
-  return run(OPEN, [...OPEN_WORDS, url]);
+/**
+ * Open a URL in the owner's browser, and say whether the opener took it. Its
+ * window shows: on Windows a hidden one would pass through rundll32 to the
+ * program the URL opens, which could then open hidden.
+ */
+export async function openUrl(url: string): Promise<boolean> {
+  const r = await probe(OPEN, [...OPEN_WORDS, url], { showWindow: true });
+  switch (r.status) {
+    case 'ok':
+      return true;
+    case 'failed':
+    case 'missing':
+    case 'timeout':
+      return false;
+    default: {
+      const missed: never = r;
+      throw new Error(`The opener came back as ${JSON.stringify(missed)}`);
+    }
+  }
 }
 
 /**
@@ -118,7 +305,11 @@ export const OPENER_FAILS_WITHIN_MS = 1_000;
  */
 export function openFile(path: string): Promise<boolean> {
   return new Promise((done) => {
-    const child = spawn(OPEN, [...OPEN_WORDS, path], { detached: true, stdio: 'ignore' });
+    const child = spawn(OPEN, [...OPEN_WORDS, path], {
+      detached: true,
+      stdio: 'ignore',
+      env: hostEnv()
+    });
     const working = setTimeout(() => done(true), OPENER_FAILS_WITHIN_MS);
     const failed = (why: unknown) => {
       clearTimeout(working);
@@ -230,7 +421,7 @@ const xml = (s: string) =>
 const quoted = (s: string) => `"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 const quietly = (cmd: string, args: string[]) => {
   try {
-    execFileSync(cmd, args, { stdio: 'ignore' });
+    execFileSync(cmd, args, { stdio: 'ignore', env: hostEnv() });
   } catch {
     // Not running.
   }

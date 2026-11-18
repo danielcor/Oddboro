@@ -16,6 +16,7 @@ const { ASK_KINDS, asks, followUps, jobs, ledger, pokes, reports, staff, tasks }
 const { OWNER_ANSWERS } = await import('../src/desk-answers.ts');
 const { eq } = await import('drizzle-orm');
 const O = await import('../src/office.ts');
+const H = await import('../src/hand-offs.ts');
 const L = await import('../src/leaving.ts');
 const { MANAGER_ROLE } = await import('../src/managers.ts');
 const { HIRE_DEFAULTS } = await import('../src/grantable.ts');
@@ -39,6 +40,7 @@ beforeEach(async () => {
     'attachments',
     'tasks',
     'asks',
+    'threads',
     'reports',
     'pokes',
     'runs',
@@ -236,4 +238,220 @@ test('every kind whose yes moves an Odd refuses a yes it cannot carry out, and s
     });
     assert.equal((await askOf(ask.id)).status, 'open', kind);
   }
+});
+
+// Rico leads work it handed Bea; Bea's result comes back to Rico's pick-up.
+type Row = typeof followUps.$inferSelect;
+const followUp = async (id: number): Promise<Row> =>
+  (await db.select().from(followUps).where(eq(followUps.id, id)))[0];
+
+/** Rico hands Bea a step on new work, and Bea's run starts on it. */
+async function handsBea(): Promise<Row> {
+  await db.insert(staff).values(odd('bea', 'Bea'));
+  const r = await H.handOff({
+    from: 'rico',
+    to: 'bea',
+    work: { title: 'Draw the map', brief: 'Draw it.' },
+    thread: { title: 'The map' }
+  });
+  assert.ok('id' in r, JSON.stringify(r));
+  assert.ok(await O.startFollowUp(r.id));
+  return followUp(r.id);
+}
+/** Rico's pick-ups of what Bea sent back, oldest first. */
+const ricosPickUps = async (): Promise<Row[]> =>
+  (await db.select().from(followUps).where(eq(followUps.staffId, 'rico')))
+    .filter((f) => f.kind === 'handed_back')
+    .sort((a, b) => a.id - b.id);
+/** Bea's run raises an ask on the step, as raise_ask does there. */
+const beaAsks = async (h: Row) =>
+  (
+    await O.raiseAsk('bea', {
+      title: 'Buy ink',
+      why: 'The map needs it.',
+      ifApproved: 'I buy it.',
+      handOffId: h.id,
+      threadId: h.threadId ?? undefined
+    })
+  ).ask;
+const pokesOf = (id: string) => db.select().from(pokes).where(eq(pokes.staffId, id));
+
+test("a lead removed while it picks up a colleague's result leaves nothing on the desk, and the colleague pokes the owner", async () => {
+  const h = await handsBea();
+  await O.finishFollowUp(h, 'Draw the map', 'done', 'Drew it.');
+  const [back] = await ricosPickUps();
+  assert.ok(await O.startFollowUp(back.id));
+  assert.equal(await L.removeOdd('rico'), undefined);
+  // The office stops the run as Rico leaves, and records it as stopped.
+  await O.finishFollowUp(back, 'Draw the map', 'failed', 'Stopped.');
+  assert.deepEqual(await db.select().from(reports).where(eq(reports.staffId, 'rico')), []);
+  assert.deepEqual(
+    (await pokesOf('bea')).map((p) => p.message),
+    [
+      'Bea finished "Draw the map", but could not hand it back to Rico because Rico is no longer here.'
+    ]
+  );
+});
+
+test("no 'could not hand it back' poke when the hand-back is the owner's own answer", async () => {
+  const h = await handsBea();
+  const ask = await beaAsks(h);
+  await O.finishFollowUp(h, 'Draw the map', 'waiting', 'Asked for ink.');
+  const [waited] = await ricosPickUps();
+  assert.ok(await O.startFollowUp(waited.id));
+  await O.finishFollowUp(waited, 'Draw the map', 'done', 'Waiting on the ink.');
+  await O.decideAsk(ask.id, 'deny', null);
+  const [, answer] = await ricosPickUps();
+  // Only the answered mark keeps this one from poking: it ended failed, not waiting.
+  assert.equal(answer.handOff?.answered, true);
+  assert.equal(answer.handOff?.outcome, 'failed');
+  assert.equal(await L.removeOdd('rico'), undefined);
+  assert.equal((await followUp(answer.id)).outcome, 'failed');
+  assert.deepEqual(await pokesOf('bea'), []);
+});
+
+test("no poke when the colleague's run ended waiting", async () => {
+  const h = await handsBea();
+  await beaAsks(h);
+  await O.finishFollowUp(h, 'Draw the map', 'waiting', 'Asked for ink.');
+  const [waiting] = await ricosPickUps();
+  assert.equal(waiting.handOff?.outcome, 'waiting');
+  assert.notEqual(waiting.handOff?.answered, true);
+  assert.equal(await L.removeOdd('rico'), undefined);
+  assert.equal((await followUp(waiting.id)).outcome, 'failed');
+  assert.deepEqual(await pokesOf('bea'), []);
+});
+
+test('an Odd brought back does not start work its leaving already failed', async () => {
+  const [r] = await db
+    .insert(followUps)
+    .values({ staffId: 'rico', kind: 'first_day', note: null })
+    .returning();
+  assert.equal(await L.removeOdd('rico'), undefined);
+  assert.equal((await followUp(r.id)).outcome, 'failed');
+  assert.equal(await L.bringBack('rico'), undefined);
+  assert.deepEqual(
+    (await O.followUpsToDo()).map((f) => f.id),
+    []
+  );
+  assert.equal(await O.startFollowUp(r.id), undefined);
+  assert.equal((await followUp(r.id)).startedAt, null);
+});
+
+test("after a lead is brought back, the owner's next answer starts a pick-up instead of joining one its leaving failed", async () => {
+  const h = await handsBea();
+  const work = h.threadId;
+  assert.ok(work);
+  const task = await O.giveTask(null, {
+    title: 'Sign the map',
+    why: 'It needs a name on it.',
+    steps: ['Sign it'],
+    threadId: work
+  });
+  const { ask } = await O.raiseAsk('rico', {
+    title: 'Buy ink',
+    why: 'The map needs ink.',
+    ifApproved: 'Rico buys ink.',
+    threadId: work
+  });
+  // Rico's own runs on the work, oldest first.
+  const ricosOnWork = async () =>
+    (await db.select().from(followUps).where(eq(followUps.staffId, 'rico')))
+      .filter((f) => f.threadId === work)
+      .sort((a, b) => a.id - b.id);
+  await O.decideAsk(ask.id, 'deny', null);
+  const [denied] = (await ricosOnWork()).filter((f) => f.kind === 'resume');
+  assert.ok(
+    denied && denied.startedAt === null && denied.outcome === null,
+    'the no queued a pick-up'
+  );
+  assert.equal(await L.removeOdd('rico'), undefined);
+  assert.equal((await followUp(denied.id)).outcome, 'failed');
+  assert.equal(await L.bringBack('rico'), undefined);
+  await O.finishTask(task.id, false, 'no');
+  const waiting = (await ricosOnWork()).filter((f) => f.outcome === null && f.startedAt === null);
+  assert.equal(waiting.length, 1, JSON.stringify(waiting));
+  assert.match(waiting[0].note ?? '', /dropped/);
+});
+
+test('a callback given to whenOddLeaves runs once when the Odd leaves, after its leaving is saved', async () => {
+  // A connection of its own, open already, so the callback's read goes the
+  // moment it runs. One from the pool may still be connecting, and a read
+  // that waits for it would find the leaving saved whenever the callback ran.
+  const own = await sql.reserve();
+  const seen: { id: string; leftAt: PromiseLike<{ left_at: Date | null }[]> }[] = [];
+  const stop = L.whenOddLeaves(
+    (id) =>
+      void seen.push({
+        id,
+        leftAt: own<
+          { left_at: Date | null }[]
+        >`select left_at from staff where id = ${id}`.execute()
+      })
+  );
+  try {
+    assert.equal(await L.removeOdd('rico'), undefined);
+    // Gone already: a second leaving has nothing to stop.
+    await L.removeOdd('rico');
+    assert.deepEqual(
+      seen.map((s) => s.id),
+      ['rico']
+    );
+    const [read] = await seen[0].leftAt;
+    assert.ok(read?.left_at, 'the callback ran before the leaving was saved');
+  } finally {
+    stop();
+    own.release();
+  }
+});
+
+test('a leaving that cannot close all its open work leaves the Odd in the office with that work as it was', async () => {
+  const stopped: string[] = [];
+  const stop = L.whenOddLeaves((id) => void stopped.push(id));
+  const { ask } = await O.raiseAsk('rico', { title: 'Buy ink', why: 'w', ifApproved: 'i' });
+  const task = await O.giveTask('rico', { title: 'Sign in', why: 'w', steps: ['Sign in'] });
+  // The task's drop fails, as any write might.
+  await sql.unsafe(`create function refuse_drop() returns trigger language plpgsql as $$
+    begin raise exception 'The desk is busy.'; end $$`);
+  await sql.unsafe(`create trigger refuse_drop before update on tasks for each row
+    when (new.status = 'dropped') execute function refuse_drop()`);
+  try {
+    // The database's words come as the cause of the failed query.
+    await assert.rejects(L.removeOdd('rico'), (e: Error) =>
+      /The desk is busy/.test(String(e.cause))
+    );
+  } finally {
+    await sql.unsafe('drop trigger refuse_drop on tasks');
+    await sql.unsafe('drop function refuse_drop');
+    stop();
+  }
+  assert.ok(await O.staffer('rico'), 'the Odd left with its work still open');
+  assert.equal((await askOf(ask.id)).status, 'open');
+  assert.equal((await db.select().from(tasks).where(eq(tasks.id, task.id)))[0].status, 'open');
+  assert.deepEqual(stopped, []);
+});
+
+test('an edit the owner saves to a file of an Odd that left queues no lesson run', async () => {
+  const { learnFromEdit } = await import('../src/lessons.ts');
+  assert.equal(await L.removeOdd('rico'), undefined);
+  assert.equal(
+    await learnFromEdit('rico', { path: 'notes/plan.md', before: 'mine' }, 'theirs'),
+    false
+  );
+  assert.deepEqual(
+    (await db.select().from(followUps).where(eq(followUps.staffId, 'rico'))).filter(
+      (f) => f.outcome === null
+    ),
+    []
+  );
+});
+
+test('a tool call still running when its test ends is cut off with its tool server', async () => {
+  const c = await toolServer('rico', { RUN_KEY: 'k-left-running', ...said });
+  void c.callTool({ name: 'leave_office', arguments: { why: 'Left running.' } }).catch(() => {});
+});
+
+test('so the next test starts with nothing the last one left running', async () => {
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(await db.select().from(asks), []);
 });

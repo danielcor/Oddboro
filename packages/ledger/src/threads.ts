@@ -9,7 +9,7 @@
 // one, even a finished one, which reopens for a new round of work. A round
 // takes up to `HAND_OFF_LIMIT` hand-offs; past it the owner decides whether
 // the work keeps going, and a yes starts the hand-off that waited. While the plan's usage window is nearly used up, new
-// hand-offs to Odds on Claude Code wait for it (usage-window.ts).
+// hand-offs to Odds on Claude Code wait for it (`handedOff` in work/hand-offs.ts).
 import { realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -20,7 +20,6 @@ import {
   inArray,
   isNotNull,
   isNull,
-  lte,
   ne,
   notInArray,
   or,
@@ -28,6 +27,7 @@ import {
   type SQL
 } from 'drizzle-orm';
 import { db } from './db.ts';
+import { fixedError } from './errors.ts';
 import { manager } from './goals.ts';
 import { home } from './home.ts';
 import {
@@ -39,17 +39,18 @@ import {
   staffGoals,
   tasks,
   threads,
-  chatCardOf,
-  type HeldHandOff,
-  type InChat,
   type Outcome,
   type ThreadStatus
 } from './schema.ts';
 import { flat, type DeskItem } from './desk-answers.ts';
-import { heldTools, lacking, sharing, toolNames, type Tool } from './sharing.ts';
+import { heldTools, lacking, toolNames, type Tool } from './sharing.ts';
 import { carryEach, type Carried, type CarriedFile } from './hand-offs.ts';
-import { holdForWindow, WINDOW_RESET, windowWoke } from './usage-window.ts';
 import { THREADS_DIR, workPath } from './work-paths.ts';
+import { runAfters } from './transition.ts';
+import { transitionWork } from './work/apply.ts';
+import { decide } from './work/decide.ts';
+import type { EventOf } from './work/events.ts';
+import { loadWork } from './work/load.ts';
 
 export type ThreadRow = typeof threads.$inferSelect;
 
@@ -68,129 +69,43 @@ export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 /** The database, or a transaction under way on it. */
 export type Db = typeof db | Tx;
 
-/**
- * The thread keeps the key of a run that put work on it from outside it: a
- * hand-off, taken or held (`takeHandOff`), or a plan (`raiseAsk`). While that
- * run goes, the hub's pick-ups there wait (`waitsOnOwnRun` in office-follow-ups.ts). Only
- * the office's memory says which keys still go (`runsGoing`), so a key from
- * before a restart holds nothing, and none needs clearing.
- */
-export async function keepRun(
-  q: Db,
-  id: number,
-  run: { key: string | undefined; by: string }
-): Promise<void> {
-  // Only the hub's own run: a key holds the hub's pick-ups whoever's run it
-  // is, so a colleague's run kept here would stall the lead.
-  if (run.key)
-    await q
-      .update(threads)
-      .set({ runs: sql`array_append(array_remove(${threads.runs}, ${run.key}), ${run.key})` })
-      .where(and(eq(threads.id, id), eq(threads.hubId, run.by)));
-}
-
-/**
- * Write a follow-up, and move the thread it works on. Every follow-up on a
- * thread is written here, so a thread's holder and status never fall behind.
- */
-export async function addFollowUp(q: Db, values: typeof followUps.$inferInsert): Promise<number> {
-  const [row] = await q.insert(followUps).values(values).returning({ id: followUps.id });
-  if (values.threadId) await settleThread(q, values.threadId);
-  return row.id;
-}
-
-/**
- * Where a thread stands, from its runs: open while one has yet to end, the
- * hub parked it until a time or a task's end, or an ask or task raised on it is still open,
- * else as its latest run ended, and open before any has. Its holder is
- * whoever has the newest run still to end, else the hub. An ended thread
- * stays as it ended. The one place a thread's status is worked out.
- */
-export async function settleThread(q: Db, id: number): Promise<void> {
-  const [t] = await q.select().from(threads).where(eq(threads.id, id));
-  if (!t || t.endedAt) return;
-  const [pending] = await q
-    .select({ staffId: followUps.staffId })
-    .from(followUps)
-    .where(and(eq(followUps.threadId, id), isNull(followUps.outcome)))
-    .orderBy(desc(followUps.id))
-    .limit(1);
-  const [last] = await q
-    .select({ outcome: followUps.outcome })
-    .from(followUps)
-    .where(and(eq(followUps.threadId, id), isNotNull(followUps.outcome)))
-    .orderBy(desc(followUps.doneAt), desc(followUps.id))
-    .limit(1);
-  // However the last run ended, the owner's answer to what it raised brings the
-  // hub back, so the thread must not end before it. A run that ended waiting
-  // waits on that answer too, even once the desk holds nothing more of it.
-  const status: ThreadStatus =
-    pending ||
-    t.resumeAt ||
-    t.resumeOnTask ||
-    !last?.outcome ||
-    last.outcome === 'waiting' ||
-    (await waitingOn(q, [id])).length
-      ? 'open'
-      : last.outcome;
-  await q
-    .update(threads)
-    .set({
-      status,
-      holderId: pending?.staffId ?? t.hubId,
-      endedAt: status === 'done' || status === 'failed' ? new Date() : null
-    })
-    .where(eq(threads.id, id));
-}
-
-/** The ended threads a hub may continue, which reopens them. Not a stopped one: the owner said no to more hand-offs on it. */
-const REOPENS: ThreadStatus[] = ['done', 'failed'];
-
-/**
- * An ended thread opens again for a new round of work, as continuing one
- * does (`takeHandOff`). Only from the statuses in `from`; an open one is left
- * as it is.
- */
-async function reopen(q: Db, id: number, from: ThreadStatus[]): Promise<void> {
-  await q
-    .update(threads)
-    .set({ status: 'open', endedAt: null, handOffsUsed: 0 })
-    .where(and(eq(threads.id, id), inArray(threads.status, from)));
-}
-
-/** What an Odd is told when it would open a thread it may not lead (`openThread`). */
+/** What an Odd is told when it would open a thread it may not lead (`assertMayLead`). */
 export const LEADS_NONE =
   "Nothing was opened. You serve a goal and have no job of your own, so you lead no work: the goal's lead hands each piece on. Pass the owner's words to the lead with tell_lead, then tell the owner you passed them on.";
 
 /**
- * The one place a thread is opened, with `hubId` as its lead. An Odd that
- * serves a goal and has no job does only that goal's work, which the goal's
- * lead hands on, so it never leads a thread: this throws instead, whatever
- * tool or run got here, and the tool server returns the throw as an error the
- * Odd reads. The manager leads every goal's thread, so it is never refused.
+ * Opens a thread outside the work core, with `hubId` as its lead, once it
+ * may lead work (`assertMayLead`). A hand-off opens its new work through the work
+ * core instead, after the same check.
  */
 async function openThread(
   q: Db,
   t: { title: string; hubId: string; goalId?: number }
 ): Promise<ThreadRow> {
-  const [serves] = await q
-    .select({ id: staffGoals.goalId })
-    .from(staffGoals)
-    .where(eq(staffGoals.staffId, t.hubId))
-    .limit(1);
-  if (serves) {
-    const [job] = await q
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(eq(jobs.staffId, t.hubId))
-      .limit(1);
-    if (!job && (await manager(q))?.id !== t.hubId) throw new Error(LEADS_NONE);
-  }
+  await assertMayLead(q, t.hubId);
   const [opened] = await q
     .insert(threads)
     .values({ ...t, holderId: t.hubId })
     .returning();
   return opened;
+}
+
+/**
+ * An Odd that serves a goal and has no job does only that goal's work, which
+ * the goal's lead hands on, so it never leads a thread: this throws instead,
+ * whatever tool or run got here, and the tool server returns the throw as an
+ * error the Odd reads. The manager leads every goal's thread, so it is never
+ * refused.
+ */
+export async function assertMayLead(q: Db, hubId: string): Promise<void> {
+  const [serves] = await q
+    .select({ id: staffGoals.goalId })
+    .from(staffGoals)
+    .where(eq(staffGoals.staffId, hubId))
+    .limit(1);
+  if (!serves) return;
+  const [job] = await q.select({ id: jobs.id }).from(jobs).where(eq(jobs.staffId, hubId)).limit(1);
+  if (!job && (await manager(q))?.id !== hubId) throw new Error(LEADS_NONE);
 }
 
 /**
@@ -200,12 +115,22 @@ async function openThread(
  * hand-off for the goal, so a hire serving it joins it as a colleague and
  * never leads one of its own. An ended one is found as it is, so the goal
  * never gets a second: what lands on it opens it again, an ask or task
- * (`raisedOn`) or the lead's next hand-off (`takeHandOff`), so a lookup alone,
- * such as a hand-off the office refuses, changes nothing. A stopped one opens
- * again only for a new plan (`raisedOn`); a hand-off there is refused until
- * then. Opening one counts no hand-off against its limit.
+ * (`raisedOn` in work/threads.ts) or the lead's next hand-off, so a lookup alone, such as a
+ * hand-off the office refuses, changes nothing. A stopped one opens again
+ * only for a new plan (`raisedOn`); a hand-off there is refused until then.
+ * Opening one counts no hand-off against its limit.
  */
 export async function goalThread(q: Db, goalId: number, opener: string): Promise<number> {
+  const work = await goalThreadOrNew(q, goalId, opener);
+  return 'id' in work ? work.id : (await openThread(q, work.open)).id;
+}
+
+/** A goal's one thread, as `goalThread` finds it, or the one to open for it when it has none yet. */
+export async function goalThreadOrNew(
+  q: Db,
+  goalId: number,
+  opener: string
+): Promise<{ id: number } | { open: { title: string; hubId: string; goalId: number } }> {
   const lead = (await manager(q))?.id;
   const [found] = await q
     .select({ id: threads.id })
@@ -213,34 +138,18 @@ export async function goalThread(q: Db, goalId: number, opener: string): Promise
     .where(and(eq(threads.goalId, goalId), lead ? eq(threads.hubId, lead) : undefined))
     .orderBy(desc(threads.id))
     .limit(1);
-  if (found) return found.id;
+  if (found) return { id: found.id };
   const [g] = await q.select({ title: goals.title }).from(goals).where(eq(goals.id, goalId));
   if (!g) throw new Error(`No goal #${goalId}`);
-  return (await openThread(q, { title: g.title, goalId, hubId: lead ?? opener })).id;
-}
-
-/**
- * Something raised on a thread, an ask or a task, keeps it waiting until the
- * owner answers, so a finished thread opens again for it (`reopen`), and the
- * thread settles with it open. A stopped one stays stopped: the owner said no
- * to its work. Only a new plan for a goal opens the goal's stopped thread
- * (`plan`), since the plan asks the owner afresh.
- */
-export async function raisedOn(q: Db, id: number, o: { plan?: boolean } = {}): Promise<void> {
-  await reopen(q, id, o.plan ? [...REOPENS, 'stopped'] : REOPENS);
-  await settleThread(q, id);
+  return { open: { title: g.title, hubId: lead ?? opener, goalId } };
 }
 
 /**
  * Why a hub may not name this thread for an ask or task from a run on no
  * thread, or undefined when it may: as `continue_work` is checked, it must
- * lead it, and the owner must not have stopped it.
+ * lead it, and it must not have stopped.
  */
-export async function notLed(t: {
-  hubId: string;
-  threadId: number;
-  owner: string;
-}): Promise<string | undefined> {
+export async function notLed(t: { hubId: string; threadId: number }): Promise<string | undefined> {
   const [row] = await db
     .select({ hubId: threads.hubId, status: threads.status })
     .from(threads)
@@ -248,7 +157,7 @@ export async function notLed(t: {
   if (row?.hubId !== t.hubId)
     return `Work ${t.threadId} is not work you lead. Name one your instructions list as work you lead, or null.`;
   if (row.status === 'stopped')
-    return `${t.owner} stopped work ${t.threadId}, so nothing more goes on it. Name another, or null.`;
+    return `Work ${t.threadId} has stopped, so nothing more goes on it. Name another, or null.`;
   return undefined;
 }
 
@@ -259,193 +168,30 @@ export async function notLed(t: {
  */
 export type ThreadFor = { id: number } | { title: string; goalId?: number };
 
-/**
- * The hand-offs a round of work takes before the office asks the owner whether
- * it keeps going (`askToKeepGoing`). The one finished round in the trial
- * offices took 6: plan, build, review, a fix and a check, and one more.
- */
-export const HAND_OFF_LIMIT = 8;
-
-/** What a hand-off came to: counted on a thread, refused, or held for the owner's answer. */
-export type Taken = ThreadRow | { problem: string } | { asked: number; thread: number };
+// Its one home is the work core's hand-off decider, which holds the round to it.
+export { HAND_OFF_LIMIT } from './work/hand-offs.ts';
 
 /** "1 hand-off", "3 hand-offs". */
 export const handOffsWord = (n: number): string => `${n} ${n === 1 ? 'hand-off' : 'hand-offs'}`;
 
 /**
- * Count one hand-off against a thread: on a new thread, on a finished one it
- * continues (which reopens it with the same folder, history, goal and request,
- * for a new round), or on a goal's thread. A round takes up to
- * `HAND_OFF_LIMIT`; the next is held on the owner's answer (`askToKeepGoing`),
- * and past the usage window's guard, on the window (`holdForWindow`). Taken
- * or held, the thread keeps the key of the run handing off (`threads.runs`),
- * so the hub's pick-ups there wait while that run goes, even when no hand-off
- * was written.
- */
-export async function takeHandOff(
-  tx: Tx,
-  h: {
-    from: string;
-    to: string;
-    thread: ThreadFor;
-    run?: string;
-    work: { title: string; brief: string; files?: string[] };
-  }
-): Promise<Taken> {
-  const held: HeldHandOff = { from: h.from, to: h.to, ...h.work };
-  const on = h.thread;
-  let id: number;
-  if ('id' in on) id = on.id;
-  // Work for a goal goes on the goal's one thread, which only its lead hands on in.
-  else if (on.goalId !== undefined) id = await goalThread(tx, on.goalId, h.from);
-  else {
-    const opened = await openThread(tx, { title: on.title, hubId: h.from });
-    await keepRun(tx, opened.id, { key: h.run, by: h.from });
-    return (await holdForWindow(tx, opened, h.to)) ?? count(tx, opened, held);
-  }
-  // Locked, so two hand-offs at once cannot both take the last one left, or ask twice.
-  const [t] = await tx.select().from(threads).where(eq(threads.id, id)).for('update');
-  if (t?.hubId !== h.from)
-    return {
-      problem: `Work ${id} is not work you lead. Hand off on work you lead, or start new work.`
-    };
-  if (t.endedAt && !REOPENS.includes(t.status))
-    return {
-      problem: `Work ${id} has ended (${t.status}). Nothing more runs on it. Tell the owner so.`
-    };
-  const [asked] = await tx
-    .select({ id: asks.id })
-    .from(asks)
-    .where(and(eq(asks.threadId, id), eq(asks.kind, 'hand_offs'), eq(asks.status, 'open')));
-  if (asked)
-    return {
-      problem: `Work ${id} waits on the owner's answer to ask #${asked.id} about going on, and holds the hand-off that raised it, which goes ahead on their yes. This one did not go: once the held one comes back, hand it on again if it is still needed. Finish this run; their answer brings you back.`
-    };
-  await keepRun(tx, id, { key: h.run, by: h.from });
-  return (await holdForWindow(tx, t, h.to)) ?? count(tx, t, held);
-}
-
-/**
- * One more hand-off in this round, or the owner's ask, holding `held`, once
- * the round has taken `HAND_OFF_LIMIT`. Continuing an ended thread starts a
- * new round; clearing `endedAt` reopens it, and its status follows from the
- * hand-off written next (`settleThread`).
- */
-async function count(tx: Tx, t: ThreadRow, held: HeldHandOff): Promise<Taken> {
-  const used = t.endedAt ? 0 : t.handOffsUsed;
-  if (used >= HAND_OFF_LIMIT) return askToKeepGoing(tx, t, held);
-  const [taken] = await tx
-    .update(threads)
-    .set({ endedAt: null, handOffsUsed: used + 1 })
-    .where(eq(threads.id, t.id))
-    .returning();
-  return taken;
-}
-
-/**
- * A round of work took its limit and the hub hands off again: one ask goes on
- * the owner's desk holding that hand-off (`asks.held`), and the thread waits
- * on it. A yes starts the held hand-off as the first of a new round
- * (`startHeld`); a no stops the thread, and the held one never goes.
- */
-async function askToKeepGoing(tx: Tx, t: ThreadRow, held: HeldHandOff): Promise<Taken> {
-  const [hub] = await tx.select({ name: staff.name }).from(staff).where(eq(staff.id, t.hubId));
-  const [to] = await tx.select({ name: staff.name }).from(staff).where(eq(staff.id, held.to));
-  // The owner reads the work by its title: no thread, no number, no hand-off count.
-  const [ask] = await tx
-    .insert(asks)
-    .values({
-      staffId: t.hubId,
-      kind: 'hand_offs',
-      threadId: t.id,
-      held,
-      title: `${hub.name} needs a few more steps to finish ${t.title}. Go ahead?`,
-      why: `${hub.name} has handed on as many pieces of ${t.title} as the office lets work go without asking you.`,
-      ifApproved: `${to.name} starts on "${held.title}" now, as ${hub.name} asked. If you say no, ${t.title} stops.`
-    })
-    .returning({ id: asks.id });
-  await settleThread(tx, t.id);
-  return { asked: ask.id, thread: t.id };
-}
-
-/**
- * A yes to a `hand_offs` ask starts the hand-off it held, as the hub wrote it,
- * as the first of a new round, and its result brings the hub back as any
- * hand-off's does. It runs in the transaction that claims the ask (`decide`
- * in office-decide.ts), so a stop between the two cannot leave the yes with nothing
- * started. What it carries is worked out now (`sharing`), from access as it
- * is at the yes.
- */
-export async function startHeld(
-  tx: Tx,
-  a: Pick<typeof asks.$inferSelect, 'held' | 'threadId'>
-): Promise<void> {
-  if (!a.held || !a.threadId) return;
-  // Only what the lead chose: an ask held by an earlier build also stored
-  // what it carried then, which access may have changed since.
-  const { from, to, title, brief, files } = a.held;
-  await tx.update(threads).set({ handOffsUsed: 1 }).where(eq(threads.id, a.threadId));
-  await addFollowUp(tx, {
-    staffId: to,
-    kind: 'hand_off',
-    note: null,
-    handOff: await sharing(tx, { from, to, title, brief, files, threadId: a.threadId }),
-    threadId: a.threadId
-  });
-}
-
-/**
- * The owner answered a `hand_offs` ask. A yes already started the hand-off
- * it held (`startHeld`); the hub hears the yes itself only when the owner
- * wrote something with it. A no stops the thread, the held hand-off never
- * goes, and the hub hears so it can say where the work stands.
- */
-export async function answerHandOffs(
-  a: Pick<typeof asks.$inferSelect, 'id' | 'held' | 'reason'> & { threadId: number },
-  approved: boolean,
-  answer: string
-): Promise<void> {
-  if (!approved) {
-    await db
-      .update(threads)
-      // The park goes with the round the owner stopped: a later plan reopens
-      // this work afresh, and must not find it still waiting on that task.
-      .set({ status: 'stopped', endedAt: new Date(), resumeOnTask: null })
-      .where(eq(threads.id, a.threadId));
-    return answerThread(
-      a.threadId,
-      `${answer} The work has stopped: nothing more runs on it. Say where it stands, and finish.`,
-      a.id
-    );
-  }
-  if (!a.held) {
-    // An ask raised before asks held their hand-off: the hub hands on again.
-    await db.update(threads).set({ handOffsUsed: 0 }).where(eq(threads.id, a.threadId));
-    return answerThread(a.threadId, `${answer} Hand on the next piece now.`, a.id);
-  }
-  if (a.reason) {
-    const { to, title } = a.held;
-    const [colleague] = await db.select({ name: staff.name }).from(staff).where(eq(staff.id, to));
-    await answerThread(
-      a.threadId,
-      `${answer} "${title}" went to ${colleague?.name ?? to} as you handed it, the first hand-off of a new round, and its result brings you back. Do not hand it on again.`,
-      a.id
-    );
-  }
-}
-
-/**
- * The hub sets when it picks the thread back up. Undefined when it is not the
- * hub's or has ended. The hub's own time replaces a hold for the usage window
- * and a park on a task.
+ * The hub sets when it picks the thread back up, through the work core
+ * (`parked`). Undefined when it is not the hub's or has ended. The hub's own
+ * time replaces a hold for the usage window and a park on a task.
  */
 export async function parkThread(hubId: string, id: number, at: Date): Promise<Date | undefined> {
-  const [row] = await db
-    .update(threads)
-    .set({ resumeAt: at, heldBy: null, resumeOnTask: null })
-    .where(and(eq(threads.id, id), eq(threads.hubId, hubId), isNull(threads.endedAt)))
-    .returning({ at: threads.resumeAt });
-  return row?.at ?? undefined;
+  const parked = await transitionWork({
+    kind: 'parked',
+    staffId: hubId,
+    threadId: id,
+    on: { at },
+    // A park on a time reads only the work the Odd leads.
+    worksOn: new Set()
+  });
+  if ('refused' in parked) return undefined;
+  const r = parked.change.result;
+  if (!('at' in r)) throw fixedError('A park on a time came back as a park on a task.');
+  return r.at;
 }
 
 /** Threads parked until a time, for the office clock. */
@@ -458,96 +204,12 @@ export async function parkedThreads(): Promise<{ id: number; resumeAt: Date }[]>
 }
 
 /**
- * The time a thread was parked until has come: the hub picks it up. The claim
- * makes it once only. A thread the usage window held is told the window reset.
+ * The time a thread was parked until has come: the hub picks it up, through
+ * the work core (`clockWoke`), which wakes it once however many wakes come.
+ * A thread the usage window held is told the window reset.
  */
 export async function wakeThread(id: number): Promise<void> {
-  await db.transaction(async (tx) => {
-    const [was] = await tx
-      .select({ heldBy: threads.heldBy })
-      .from(threads)
-      .where(eq(threads.id, id))
-      .for('update');
-    const [due] = await tx
-      .update(threads)
-      .set({ resumeAt: null, heldBy: null })
-      .where(and(eq(threads.id, id), lte(threads.resumeAt, new Date()), isNull(threads.endedAt)))
-      .returning({ hubId: threads.hubId });
-    if (!due) return;
-    await addFollowUp(tx, {
-      staffId: due.hubId,
-      kind: 'resume',
-      threadId: id,
-      note: was?.heldBy ? WINDOW_RESET : null
-    });
-    if (was?.heldBy) await windowWoke(tx, was.heldBy);
-  });
-}
-
-/**
- * The owner answered something the hub raised on a thread, and no run follows
- * it: a denial, a dropped task, an approved hire or plan. The hub picks up with
- * the answer, and with `askId`, the ask it answers, so its brief can say what
- * comes next, such as starting the work of a plan the owner approved. While a
- * pick-up of the hub's there has yet to start, as when a run of the hub's on
- * the thread holds it (`waitsOnOwnRun` in office-follow-ups.ts), each answer joins it, a
- * line each, so several hires landing together wake it once. The claim
- * returns the row as joined (`startFollowUp`), so the run reads every line.
- */
-export async function answerThread(
-  id: number,
-  answer: string,
-  askId?: number,
-  q: Db = db,
-  chat?: InChat
-): Promise<void> {
-  await q.transaction(async (tx) => {
-    const [t] = await tx
-      .select({ hubId: threads.hubId, leftAt: staff.leftAt })
-      .from(threads)
-      .innerJoin(staff, eq(staff.id, threads.hubId))
-      .where(eq(threads.id, id));
-    // A lead that left the office runs nothing, so nothing wakes it: its
-    // pick-up would wait for ever, or run on work its leaving stopped once it
-    // came back (`removeOdd`).
-    if (!t || t.leftAt) return;
-    // Answered in the hub's own chat: the pick-up replies there, under the newest card answered.
-    const chatCard = chatCardOf(t.hubId, chat);
-    // Locked, so a claim cannot start it between this look and the join: the
-    // claim waits, then returns the joined note, or it went first and this
-    // answer writes a pick-up of its own.
-    const [waiting] = await tx
-      .select({ id: followUps.id, note: followUps.note })
-      .from(followUps)
-      .where(
-        and(
-          eq(followUps.staffId, t.hubId),
-          eq(followUps.threadId, id),
-          eq(followUps.kind, 'resume'),
-          isNull(followUps.startedAt)
-        )
-      )
-      .orderBy(asc(followUps.id))
-      .limit(1)
-      .for('update');
-    if (waiting)
-      await tx
-        .update(followUps)
-        .set({
-          note: waiting.note ? `${waiting.note}\n${answer}` : answer,
-          ...(chatCard ? { chatCard } : {})
-        })
-        .where(eq(followUps.id, waiting.id));
-    else
-      await addFollowUp(tx, {
-        staffId: t.hubId,
-        kind: 'resume',
-        threadId: id,
-        note: answer,
-        askId,
-        chatCard
-      });
-  });
+  await transitionWork({ kind: 'clockWoke', threadId: id });
 }
 
 export async function thread(id: number): Promise<ThreadRow | undefined> {
@@ -597,7 +259,7 @@ export const LISTED: Record<ThreadStage, string> = {
   waiting_on_you: 'waiting on {owner}',
   done: 'finished',
   failed: 'could not finish',
-  stopped: '{owner} stopped it, so it cannot be continued'
+  stopped: 'it has stopped, so it cannot be continued'
 };
 
 /**
@@ -655,12 +317,18 @@ export const worksOn = (staffId: string) =>
     )
   );
 
+/** The threads `staffId` works on (`worksOn`), as a park or tell_lead reads them before the work core decides. */
+export async function worksOnIds(q: Db, staffId: string): Promise<Set<number>> {
+  const rows = await q.select({ id: threads.id }).from(threads).where(worksOn(staffId));
+  return new Set(rows.map((r) => r.id));
+}
+
 /** A thread `staffId` leads or works on (`worksOn`), so reads all of its folder. */
 const onThread = (staffId: string) => or(eq(threads.hubId, staffId), worksOn(staffId));
 
 /** Whether `staffId` leads thread `id` or works on it. */
-export async function isOnThread(staffId: string, id: number): Promise<boolean> {
-  const [row] = await db
+export async function isOnThread(staffId: string, id: number, q: Db = db): Promise<boolean> {
+  const [row] = await q
     .select({ id: threads.id })
     .from(threads)
     .where(and(eq(threads.id, id), onThread(staffId)));
@@ -804,90 +472,69 @@ export function exchangeForLead(
 /**
  * The owner told a colleague in chat something about a thread it works on and
  * does not lead: their words go to the thread's lead, which picks the thread
- * back up with them (`answerThread`). `said` is the owner's whole message, set
- * by the office, and `words` the part about this thread, which must be in it,
- * so only the owner's own words reach the lead as theirs. `reading` is what the
- * colleague understood them to mean, which goes labelled as the colleague's,
- * since a lead cannot judge a clarifying "no" from the bare word. `exchange` is
- * the last two lines of that chat, as the office set them (`exchangeForLead`).
- * `files` are every file the owner attached to that message, as the tool
- * server checked them: each that can land is copied into the colleague's part
- * of the work (`carryEach`), and the note lists where each landed, or why it
- * did not come. A file that does not come never stops the words.
+ * back up with them, through the work core (`toldLead`). `said` is the
+ * owner's whole message, set by the office, and `words` the part about this
+ * thread, which must be in it, so only the owner's own words reach the lead as
+ * theirs. `reading` is what the colleague understood them to mean, which goes
+ * labelled as the colleague's, since a lead cannot judge a clarifying "no"
+ * from the bare word. `exchange` is the last two lines of that chat, as the
+ * office set them (`exchangeForLead`). `files` are every file the owner
+ * attached to that message, as the tool server checked them: each that can
+ * land is copied into the colleague's part of the work (`carryEach`), and the
+ * note lists where each landed, or why it did not come. A file that does not
+ * come never stops the words.
+ *
+ * One transaction locks the thread, its lead and the teller first, so a stop
+ * or a removal landing meanwhile waits for the note. What the event carries
+ * (the teller's name, the lead's tools, the work the teller is on) is read
+ * after, and the core decides on the rows it locked: once with nothing
+ * copied, so a refusal copies no file and writes nothing, then again with
+ * what the copy gave, which writes the note.
  */
 export async function tellLead(t: {
   staffId: string;
   threadId: number;
-  owner: string;
   said: string;
   words: string;
   reading: string;
   exchange?: string;
   files?: { carry: CarriedFile[]; unfit: { named: string; why: string }[] };
 }): Promise<{ lead: string; files?: Carried[] } | { problem: string }> {
-  const words = flat(t.words);
-  if (!words || !flat(t.said).includes(words))
-    return {
-      problem: `Pass ${t.owner}'s own words in words, copied exactly from their message. Your own go in your reply to them.`
+  const told = await db.transaction(async (tx) => {
+    const toLoad: EventOf<'toldLead'> = {
+      kind: 'toldLead',
+      staffId: t.staffId,
+      threadId: t.threadId,
+      said: t.said,
+      words: t.words,
+      reading: t.reading,
+      // Read below, under the locks: the loader reads only the thread and the teller.
+      exchange: '',
+      worksOn: new Set(),
+      files: []
     };
-  // The whole note stays on one line: `answers` reads each line as its own word.
-  const reading = flat(t.reading);
-  if (!reading)
-    return {
-      problem: `Say in reading what you understood ${t.owner} to mean, in your own words. Nothing was passed on.`
+    const rows = await loadWork(tx, toLoad);
+    const lead = rows.threads.get(t.threadId)?.hubId;
+    const name = rows.staff.get(t.staffId)?.name ?? t.staffId;
+    const lacks =
+      t.exchange && lead ? lacking(await heldTools([lead, t.staffId], tx), lead, [t.staffId]) : [];
+    const e: EventOf<'toldLead'> = {
+      ...toLoad,
+      exchange: exchangeForLead(t.exchange ?? '', name, lacks, REPLY_A_LEAD_LACKS),
+      worksOn: await worksOnIds(tx, t.staffId)
     };
-  const [row] = await db
-    .select({ hubId: threads.hubId, status: threads.status, lead: staff.name })
-    .from(threads)
-    .innerJoin(staff, eq(threads.hubId, staff.id))
-    .where(eq(threads.id, t.threadId));
-  if (!row) return { problem: `There is no work ${t.threadId}.` };
-  if (row.hubId === t.staffId)
-    return {
-      problem: `You lead work ${t.threadId}, so there is no lead to tell: it is yours.`
-    };
-  const [on] = await db
-    .select({ id: threads.id })
-    .from(threads)
-    .where(and(eq(threads.id, t.threadId), worksOn(t.staffId)));
-  if (!on)
-    return {
-      problem: `Work ${t.threadId} is not work you are on, so it is not yours to pass on. Tell ${t.owner} so.`
-    };
-  if (row.status === 'stopped')
-    return {
-      problem: `${t.owner} stopped work ${t.threadId}, so nothing more runs on it. Tell them so.`
-    };
-  const [me] = await db.select({ name: staff.name }).from(staff).where(eq(staff.id, t.staffId));
-  const name = me?.name ?? t.staffId;
-  const lacks = t.exchange
-    ? lacking(await heldTools([row.hubId, t.staffId]), row.hubId, [t.staffId])
-    : [];
-  const exchange = exchangeForLead(t.exchange ?? '', name, lacks, REPLY_A_LEAD_LACKS);
-  const files: Carried[] = [
-    ...carryEach(t.threadId, t.staffId, t.files?.carry ?? []),
-    ...(t.files?.unfit ?? [])
-  ];
-  // A lead once read this as the colleague taking it on, and sent no work.
-  await answerThread(
-    t.threadId,
-    `${name} passed you what ${t.owner} told them in chat about this work. You decide what comes of it and hand on any work it needs; ${name} does nothing more with it. ${t.owner}'s words: ${words} ${name}'s own reading, which is not ${t.owner}'s words: ${reading}${exchange ? ` ${exchange}` : ''}${attachedLine(files, t.owner)}`
-  );
-  return { lead: row.lead, ...(files.length ? { files } : {}) };
-}
-
-/** What the lead's note says of the files the owner attached: where each landed, and which did not come and why. */
-function attachedLine(files: Carried[], owner: string): string {
-  const landed = files.flatMap((f) => ('at' in f ? [`${flat(f.named)} at ${f.at}`] : []));
-  const left = files.flatMap((f) => ('why' in f ? [`${flat(f.named)}, since ${f.why}`] : []));
-  return [
-    landed.length
-      ? ` ${owner} attached ${landed.length === 1 ? 'a file' : `${landed.length} files`} to that message, now in this work: ${landed.join('; ')}.`
-      : '',
-    left.length
-      ? ` ${left.length === 1 ? 'One file' : `${left.length} files`} ${owner} attached did not come: ${left.join('; ')}.`
-      : ''
-  ].join('');
+    // No refusal reads the files, so this one is the one the note would get.
+    const first = decide(rows, e, new Date());
+    if ('refused' in first) return first;
+    const files: Carried[] = [
+      ...carryEach(t.threadId, t.staffId, t.files?.carry ?? []),
+      ...(t.files?.unfit ?? [])
+    ];
+    return transitionWork({ ...e, files }, { tx });
+  });
+  if ('refused' in told) return { problem: told.refused };
+  await runAfters('toldLead', told.after);
+  return told.change.result;
 }
 
 /** Something a thread put on the owner's desk that is still open. */

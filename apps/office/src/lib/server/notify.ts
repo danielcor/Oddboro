@@ -2,7 +2,7 @@
 // with the office closed: a staffer's ping, or the setup test. While the tab
 // is open the browser shows its own (Notification API), on every system.
 //
-// In the Mac app the server asks the app on stdout, one line each, and macOS
+// In the app the server asks the shell on stdout, one line each, and the shell
 // shows it as Oddboro's (apps/desktop/src-tauri/src/server.rs). Run from the
 // repo, each system has its own way, in the table below: osascript on a Mac
 // (which macOS shows as Script Editor's, so Script Editor has to be allowed in
@@ -11,8 +11,16 @@
 // on Windows through PowerShell. A toast has to name an app Windows knows, and
 // the repo installs none, so it shows as Windows PowerShell's, the way a Mac
 // shows Script Editor's.
-import { execFile } from 'node:child_process';
-import { IN_APP, SYSTEM, openUrl, powershell, type System } from '@oddboro/ledger';
+import {
+  IN_APP,
+  SYSTEM,
+  currentSystem,
+  openUrl,
+  powershell,
+  probe,
+  type Probe,
+  type System
+} from '@oddboro/ledger';
 
 // The words come in as environment variables and are escaped for XML inside.
 const TOAST = `
@@ -27,13 +35,10 @@ $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powersh
 /** One line: no tab or line break may reach the app inside the words. */
 const flat = (s: string) => s.replace(/[\t\r\n]+/g, ' ');
 
-const run = (cmd: string, args: string[]) =>
-  new Promise<boolean>((done) => execFile(cmd, args, (e) => done(!e)));
-
-const NOTIFY: Record<System, ((title: string, message: string) => Promise<boolean>) | undefined> = {
+const NOTIFY: Record<System, ((title: string, message: string) => Promise<Probe>) | undefined> = {
   // Arguments, not a script string, so the words need no escaping.
   mac: (title, message) =>
-    run('osascript', [
+    probe('osascript', [
       '-e',
       'on run argv',
       '-e',
@@ -43,9 +48,31 @@ const NOTIFY: Record<System, ((title: string, message: string) => Promise<boolea
       message,
       title
     ]),
-  linux: (title, message) => run('notify-send', ['--app-name', 'Oddboro', title, message]),
-  windows: async (title, message) =>
-    (await powershell(TOAST, { ODDBORO_TITLE: title, ODDBORO_MESSAGE: message })).ok
+  linux: (title, message) =>
+    probe('notify-send', [
+      '--app-name=Oddboro',
+      '--hint=string:desktop-entry:oddboro',
+      '--',
+      title,
+      message
+    ]),
+  windows: (title, message) => powershell(TOAST, { ODDBORO_TITLE: title, ODDBORO_MESSAGE: message })
+};
+
+/** One line for the log: the exit code, then stderr with the line breaks taken out. */
+const failed = (cmd: string, code: number | null, stderr: string) => {
+  const said = stderr.trim().replace(/\s+/g, ' ').slice(0, 300);
+  const exit = code ?? 'error';
+  return said
+    ? `notify failed: ${cmd} exited ${exit}: ${said}`
+    : `notify failed: ${cmd} exited ${exit}`;
+};
+
+/** The program each system's notification runs, for the log line. */
+const PROGRAM: Record<System, string> = {
+  mac: 'osascript',
+  linux: 'notify-send',
+  windows: 'powershell.exe'
 };
 
 /** Where each system lets the owner allow notifications. Linux has no one place, so none. */
@@ -55,16 +82,42 @@ const SETTINGS: Record<System, string | undefined> = {
   windows: 'ms-settings:notifications'
 };
 
+/**
+ * Whether this system has one place for the notification settings, so Setup
+ * offers Open it. Read per call, so a test on another system gets that
+ * system's answer.
+ */
+export function canOpenNotifySettings(): boolean {
+  const system = currentSystem();
+  return !!(system && SETTINGS[system]);
+}
+
 /** Whether this computer can show the office's own notifications. */
 export const CAN_NOTIFY = IN_APP || !!(SYSTEM && NOTIFY[SYSTEM]);
 
-export function notifyMac(title: string, message: string): Promise<boolean> {
+export async function notifyMac(title: string, message: string): Promise<boolean> {
   if (IN_APP) {
     process.stdout.write(`oddboro:notify ${flat(title)}\t${flat(message)}\n`);
-    return Promise.resolve(true);
+    return true;
   }
   const notify = SYSTEM && NOTIFY[SYSTEM];
-  return notify ? notify(title, message) : Promise.resolve(false);
+  if (!notify) return false;
+  const r = await notify(title, message);
+  switch (r.status) {
+    case 'ok':
+      return true;
+    case 'failed':
+      console.error(`office: ${failed(PROGRAM[SYSTEM!], r.code, r.err)}`);
+      return false;
+    case 'missing':
+    case 'timeout':
+      console.error(`office: notify failed: ${r.status}`);
+      return false;
+    default: {
+      const missed: never = r;
+      throw new Error(`The notification came back as ${JSON.stringify(missed)}`);
+    }
+  }
 }
 
 /** Open the system's notification settings, where it has one place for them. */

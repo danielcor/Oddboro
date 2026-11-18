@@ -26,6 +26,32 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.0.11',
+    date: '2026-11-13',
+    title: 'Work in your own projects with Claude Code and Codex, from the office.',
+    summary:
+      'Turn on Advanced mode in Setup, and Projects opens Claude Code and Codex in your own folders. Approvals, the Desk and chat all do more for you.',
+    notes: [
+      'Choose, tool by tool, which changes an Odd makes without asking and which wait for your yes. Each change an Odd waits on says what it does and why.',
+      'Answer your Desk from chat: set a goal, approve a plan, give an Odd access, or sign in where it asked.',
+      'Add to a Claude Code reply while it runs: Send now, or Ctrl+Enter, puts your words into the reply under way. Stop sits beside the reply.',
+      'Your message and files are saved the moment you send them, so closing the tab mid-reply loses nothing. An Odd no longer stays stuck on "Still replying" until you restart the office.',
+      "When your computer was off at a job's time, jobs no longer all run at once when it wakes. Each one catches up or skips the missed run, depending on the job.",
+      'When work passes from one Odd to another, the next Odd knows what was done, what you said, and which files it has.',
+      'Report an Oddboro bug from chat, with the details filled in. An Odd can draft the report for you to file.',
+      'Grok and Codex Odds start on Linux. Grok takes long messages and photos on Windows.',
+      'Signing in to New Altitude works behind company networks and antivirus that check secure connections.',
+      'An Odd can read your LegalZoom physical mailbox. It can only read, never change anything.'
+    ],
+    builds: ['mac', 'windows-x64', 'windows-arm64', 'linux-x86_64', 'linux-aarch64'],
+    art: {
+      name: 'advanced',
+      alt: 'An Odd types at its desk. On the wall, a switch under a sign marked ADVANCED flips on and its light turns green. The monitor flashes and grows into a wide terminal titled PROJECTS, where lines of code type out and scroll while the Odd keeps working.',
+      shareAlt:
+        'A pixel-art office desk where the monitor has grown into a wide terminal titled PROJECTS, full of code, beside a wall switch marked ADVANCED.'
+    }
+  },
+  {
     version: '0.0.10',
     date: '2026-11-10',
     title: 'A round of bug fixes.',

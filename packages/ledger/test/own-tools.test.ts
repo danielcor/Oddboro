@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, beforeEach, test } from 'node:test';
 import { AGENTS, COMMANDS_WHY, commandsHow, type Agent } from '../src/agents.ts';
+import { eq } from 'drizzle-orm';
 import { staff } from '../src/schema.ts';
 import { db, sql } from './pglite.ts';
 import { TEMP_IN_APPDATA } from './store-states.ts';
@@ -26,7 +27,6 @@ const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'own-tools-')));
 process.env.HOME = HOME;
 process.env.ODDBORO_HOME = join(HOME, '.oddboro');
 process.env.ODDBORO_CODE = join(HOME, 'code', 'oddboro');
-process.env.OLLAMA_URL = 'http://127.0.0.1:9';
 after(() => rmSync(HOME, { recursive: true, force: true }));
 const O = await import('../src/office.ts');
 const C = await import('../src/capabilities.ts');
@@ -315,7 +315,9 @@ test(
       home: 'Pick a folder inside your home, not the whole home.',
       secrets: 'That folder holds your keys or sign-ins.',
       code: "That folder holds Oddboro's own code.",
-      nested: 'That folder is inside one this Odd already has, or holds one.',
+      nested: "That folder holds one of this Odd's folders that has your keys or sign-ins.",
+      readInsideChange:
+        "A folder on Can read can't sit inside one on Can write. This Odd can already change everything in it.",
       broad: 'That folder is a whole drive or holds system files. Ask for a narrower one.'
     });
     const refused = (path: string) => O.checkFolder(path);
@@ -384,7 +386,12 @@ test('the secret stores are the ones the office keeps shut', () => {
     '.codex',
     '.gemini',
     '.docker',
-    '.kube'
+    '.kube',
+    '.mozilla',
+    '.local/share/keyrings',
+    '.pki',
+    'snap',
+    '.var/app'
   ]);
 });
 
@@ -687,6 +694,81 @@ test(
     assert.equal(await O.setFolder('ziva', out, 'read', true), undefined);
     assert.deepEqual((await O.staffer('ziva'))?.folders, [{ path: out, write: false }]);
     assert.equal((await titles()).length, 1);
+  }
+);
+
+test(
+  "setFolder and an Odd's ask refuse only a folder to read inside one to change",
+  { skip: TEMP_IN_APPDATA },
+  async () => {
+    const outer = folder('nest', 'outer');
+    const inner = folder('nest', 'outer', 'inner');
+    const refused = { refused: O.FOLDER_REFUSED.readInsideChange };
+    const set = (folders: { path: string; write: boolean }[]) =>
+      db.update(staff).set({ folders }).where(eq(staff.id, 'ziva'));
+    const has = async () => (await O.staffer('ziva'))?.folders;
+    const level = (write: boolean) => (write ? 'write' : 'read');
+    // Every pair, given in either order: only read inside change is refused.
+    for (const outerWrite of [false, true])
+      for (const innerWrite of [false, true])
+        for (const innerFirst of [false, true]) {
+          const pair = [
+            { path: outer, write: outerWrite },
+            { path: inner, write: innerWrite }
+          ];
+          const [first, second] = innerFirst ? [pair[1], pair[0]] : pair;
+          const say = JSON.stringify({ outerWrite, innerWrite, innerFirst });
+          await set([first]);
+          const done = await O.setFolder('ziva', second.path, level(second.write));
+          if (outerWrite && !innerWrite) {
+            assert.deepEqual(done, refused, say);
+            assert.deepEqual(await has(), [first], say);
+          } else {
+            assert.equal(done, undefined, say);
+            assert.deepEqual(await has(), [first, second], say);
+          }
+        }
+    // The Settings tab adds a folder at read, then the owner switches it:
+    // outer at read, inner added at read, inner switched to write.
+    await set([]);
+    assert.equal(await O.setFolder('ziva', outer, 'read'), undefined);
+    assert.equal(await O.setFolder('ziva', inner, 'read'), undefined);
+    assert.equal(await O.setFolder('ziva', inner, 'write'), undefined);
+    assert.deepEqual(await has(), [
+      { path: outer, write: false },
+      { path: inner, write: true }
+    ]);
+    // A level change that would leave read inside change is refused and changes nothing.
+    await set([
+      { path: outer, write: false },
+      { path: inner, write: false }
+    ]);
+    assert.deepEqual(await O.setFolder('ziva', outer, 'write'), refused);
+    await set([
+      { path: outer, write: true },
+      { path: inner, write: true }
+    ]);
+    assert.deepEqual(await O.setFolder('ziva', inner, 'read'), refused);
+    assert.equal((await has())?.length, 2);
+    // An Odd's ask follows the same rule; one a held folder covers says so.
+    const who = (folders: { path: string; write: boolean }[]) => ({ folders });
+    assert.equal(
+      O.folderAskRefused(who([{ path: outer, write: false }]), inner, 'write'),
+      undefined
+    );
+    assert.equal(O.folderAskRefused(who([{ path: inner, write: true }]), outer, 'read'), undefined);
+    assert.equal(
+      O.folderAskRefused(who([{ path: inner, write: false }]), outer, 'read'),
+      undefined
+    );
+    assert.match(
+      O.folderAskRefused(who([{ path: outer, write: false }]), inner, 'read') ?? '',
+      /You already have/
+    );
+    assert.equal(
+      O.folderAskRefused(who([{ path: inner, write: false }]), outer, 'write'),
+      O.FOLDER_REFUSED.readInsideChange
+    );
   }
 );
 
